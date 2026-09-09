@@ -11,6 +11,8 @@
 
 ## 跑起来
 
+从 [Releases](https://github.com/flintt/ghost-racer-telemetry/releases) 下对应平台的单文件二进制，或者自己编译：
+
 ```bash
 go build -o ghost-racer-telemetry .   # Windows: GOOS=windows GOARCH=amd64 go build -o ghost-racer-telemetry.exe .
 ./ghost-racer-telemetry
@@ -96,7 +98,7 @@ ghostReplays/freeRoam/<level>/<vehicleDir>/...                             2.9.8
 
 ```bash
 ./tools/check.sh                                        # gofmt + vet + test + 前端语法 + UI 冒烟 + 双平台编译
-./tools/build.sh                                        # 交叉编译 Windows / Linux 二进制到 dist/
+./tools/build.sh v0.1.0                                 # 打 release 产物到 dist/（4 个平台 + SHA256SUMS）
 ./tools/smoke.sh                                        # 单跑冒烟：无头 Chrome 加载真实页面，有 JS 报错就失败
 go run ./cmd/genfixture -out /tmp/gr/ghostReplays        # 造一份假的存档树
 go run ./cmd/genfixture -out /tmp/gr/ghostReplays -size 6  # 加大圈长（约 9500 采样点/圈）用来压渲染

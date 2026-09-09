@@ -24,6 +24,9 @@ import (
 //go:embed web
 var embeddedWeb embed.FS
 
+// version is stamped at build time: -ldflags "-X main.version=v1.2.3".
+var version = "dev"
+
 type server struct {
 	scanner     *ghost.Scanner
 	importRoot  ghost.Root
@@ -38,7 +41,13 @@ func main() {
 	webDir := flag.String("web", "", "serve the UI from this directory instead of the embedded copy")
 	allowDelete := flag.Bool("allow-delete", false, "allow deleting laps from the game folder (close BeamNG first)")
 	token := flag.String("token", "", "require this token on /api/import as ?token= or X-Ghost-Token")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	resolved, tried, err := resolveGameRoot(*gameRoot)
 	if err != nil {
@@ -76,7 +85,7 @@ func main() {
 	mux.HandleFunc("/api/lap", app.handleLap)
 	mux.HandleFunc("/api/import", app.handleImport)
 
-	fmt.Printf("Ghost Racer telemetry web\n")
+	fmt.Printf("Ghost Racer telemetry web %s\n", version)
 	for _, root := range catalog.Roots {
 		state := "missing"
 		if root.Exists {

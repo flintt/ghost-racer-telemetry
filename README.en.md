@@ -11,6 +11,8 @@ One Go binary, no dependencies, listening on `127.0.0.1` by default. Two ways to
 
 ## Running it
 
+Grab a single-file binary for your platform from [Releases](https://github.com/flintt/ghost-racer-telemetry/releases), or build it yourself:
+
 ```bash
 go build -o ghost-racer-telemetry .      # Windows: GOOS=windows GOARCH=amd64 go build -o ghost-racer-telemetry.exe .
 ./ghost-racer-telemetry
@@ -96,7 +98,7 @@ A `lib` key looks like `game:freeRoam/east_coast_usa/starts/s001/ghostracer.save
 
 ```bash
 ./tools/check.sh                                          # gofmt + vet + tests + JS syntax + UI smoke + both build targets
-./tools/build.sh                                          # cross-compile the Windows / Linux binaries into dist/
+./tools/build.sh v0.1.0                                   # release artefacts in dist/ (4 targets + SHA256SUMS)
 ./tools/smoke.sh                                          # smoke test on its own: headless Chrome loads the real page and fails on any JS error
 go run ./cmd/genfixture -out /tmp/gr/ghostReplays          # write a synthetic save tree
 go run ./cmd/genfixture -out /tmp/gr/ghostReplays -size 6  # longer laps (~9500 samples each) for render stress tests

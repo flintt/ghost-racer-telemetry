@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ghost Racer Telemetry</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">GR</span>
+    <div>
+      <h1 data-i18n="appTitle">Ghost Racer 遥测</h1>
+      <p id="rootStatus" class="muted"></p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <input id="search" type="search" data-i18n-placeholder="searchPlaceholder" autocomplete="off">
+    <button id="rescan" class="btn" data-i18n="rescan">重新扫描</button>
+    <div class="chipset small" id="themeMode" role="group">
+      <button class="chip" data-theme-mode="auto" data-i18n="themeAuto">自动</button>
+      <button class="chip" data-theme-mode="light" data-i18n="themeLight">浅色</button>
+      <button class="chip" data-theme-mode="dark" data-i18n="themeDark">深色</button>
+    </div>
+    <div class="chipset small" id="langMode" role="group">
+      <button class="chip" data-lang="zh">中文</button>
+      <button class="chip" data-lang="en">EN</button>
+    </div>
+  </div>
+</header>
+
+<main class="layout">
+  <aside class="sidebar">
+    <div class="panel-head">
+      <h2 data-i18n="libraries">记录库</h2>
+      <span id="libraryCount" class="muted"></span>
+    </div>
+    <div id="tree" class="tree"></div>
+  </aside>
+
+  <section class="content">
+    <div class="lap-panel">
+      <div class="panel-head">
+        <h2 id="libraryTitle" data-i18n="pickStart">选择一个起点</h2>
+        <div id="libraryMeta" class="muted"></div>
+      </div>
+      <div class="filters">
+        <div class="chipset" id="categoryFilter">
+          <button class="chip active" data-category="all" data-i18n="catAll">全部</button>
+          <button class="chip" data-category="lap" data-i18n="catLap">完整圈</button>
+          <button class="chip" data-category="incomplete" data-i18n="catIncomplete">未完成</button>
+          <button class="chip" data-category="manual" data-i18n="catManual">手动录制</button>
+        </div>
+        <select id="vehicleFilter" class="select"></select>
+        <select id="sortMode" class="select"></select>
+      </div>
+      <div class="lap-list-wrap"><table class="lap-list"><tbody id="lapList"></tbody></table></div>
+    </div>
+
+    <div class="analysis">
+      <div class="selected-bar">
+        <div id="selectedChips" class="chips"></div>
+        <div class="spacer"></div>
+        <label class="inline"><span class="muted" data-i18n="axisLabel">X 轴</span>
+          <div class="chipset small" id="axisMode">
+            <button class="chip active" data-axis="dist" data-i18n="axisDistance">距离</button>
+            <button class="chip" data-axis="time" data-i18n="axisTime">时间</button>
+          </div>
+        </label>
+        <label class="inline"><span class="muted" data-i18n="colorLabel">轨迹着色</span>
+          <select id="colorMode" class="select"></select>
+        </label>
+      </div>
+
+      <div class="workspace">
+        <div class="map-card">
+          <canvas id="map"></canvas>
+          <div id="mapLegend" class="legend"></div>
+          <div id="mapEmpty" class="empty" data-i18n="mapEmpty">勾选左侧记录以查看轨迹</div>
+        </div>
+        <div class="charts-card">
+          <div id="readout" class="readout"></div>
+          <div id="charts" class="charts"></div>
+        </div>
+      </div>
+
+      <div id="summaryTable" class="summary"></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

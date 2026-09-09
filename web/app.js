@@ -1,0 +1,1878 @@
+/*
+ * Ghost Racer telemetry browser.
+ *
+ * Reads the catalog served by the Go backend, then draws the selected laps as
+ * a track map and a stack of channel charts sharing one cursor. Laps are
+ * compared on distance from the start gate, which is how the mod itself lines
+ * ghosts up, so Δt is meaningful even when the laps have different durations.
+ */
+
+// One palette per theme: the dark set's white and pale yellow vanish on a light
+// background, so each slot has a light-theme counterpart at the same index.
+const LAP_PALETTES = {
+  dark: ['#ff8b3d', '#4dd6ff', '#3ddc97', '#e56bff', '#f5f5f5', '#ffd23d', '#7aa2ff', '#ff5c72'],
+  light: ['#c2570a', '#0b7fa8', '#12855b', '#9b1fb0', '#334155', '#9a6b00', '#3d4fd1', '#c0243c']
+}
+const MAX_SELECTED = 8
+
+const state = {
+  catalog: null,
+  libraries: [],
+  activeLibrary: null,
+  laps: [],
+  selected: [],          // {key, id, color, lap} — lap holds the loaded channels
+  referenceKey: null,    // `${libKey}#${id}` of the delta reference
+  filters: { category: 'all', vehicle: '', sort: 'lapTime', search: '' },
+  axis: 'dist',
+  colorMode: 'speed',
+  cursorX: null,
+  hoverLapKey: null,
+  charts: [],
+  collapsed: new Map(),
+  lang: 'en',
+  theme: 'auto'
+}
+
+/* ------------------------------------------------------------------ i18n */
+
+const I18N = {
+  zh: {
+    appTitle: 'Ghost Racer 遥测',
+    searchPlaceholder: '搜索地图 / 起点 / 赛道',
+    rescan: '重新扫描',
+    themeAuto: '自动', themeLight: '浅色', themeDark: '深色',
+    libraries: '记录库',
+    pickStart: '选择一个起点',
+    catAll: '全部', catLap: '完整圈', catIncomplete: '未完成', catManual: '手动录制',
+    axisLabel: 'X 轴', axisDistance: '距离', axisTime: '时间',
+    colorLabel: '轨迹着色',
+    mapEmpty: '勾选左侧记录以查看轨迹',
+    rootGame: '游戏存档', rootImport: '导入', rootMissing: '未找到',
+    rootSummary: (count, path) => `${count} 个库 · ${path}`,
+    noRoots: '没有配置任何数据目录',
+    libraryCount: (count) => `${count} 个`,
+    treeNoMatch: '没有匹配的记录库',
+    treeEmpty: '没有找到记录，确认 -root 指向 BeamNG 用户目录',
+    levelDetail: (libraries, laps) => `${libraries} 库 · ${laps} 圈`,
+    variantDetail: (count) => `${count} 变体`,
+    searchExpandsAll: '搜索时展开全部',
+    libraryTip: (rel, total, complete, incomplete, manual) =>
+      `${rel}\n${total} 圈（完整 ${complete} · 未完成 ${incomplete} · 手动 ${manual}）`,
+    lapsCount: (count) => `${count} 圈`,
+    tagImport: '导入',
+    pointToPoint: '点对点',
+    allVehicles: '全部车型',
+    sortLapTime: '按圈速', sortRank: '按名次', sortId: '按记录顺序', sortDuration: '按时长',
+    colorSpeed: '速度', colorInputs: '油门/刹车', colorGear: '档位',
+    colorLatG: '横向 G', colorDelta: 'Δt 对比', colorPerLap: '按记录配色',
+    lapListEmptyFiltered: '当前筛选下没有记录',
+    lapListEmpty: '这个库里还没有记录',
+    exportCsvTitle: '导出 CSV', deleteTitle: '删除这条记录',
+    deleteConfirm: (label) => `删除记录「${label}」？如果 BeamNG 正在运行，它可能会把这条记录再写回来。`,
+    deleted: '已删除', rescanned: '已重新扫描',
+    maxSelected: (max) => `最多同时对比 ${max} 条记录`,
+    incompleteLabel: (reason) => `未完成${reason ? ' · ' + reason : ''}`,
+    manualLabel: '手动', noInputs: '无输入',
+    chipReferenceTitle: '点击设为 Δt 参照圈', chipRemoveTitle: '移除',
+    metric: '指标',
+    sumLapTime: '圈速', sumDuration: '时长 (s)', sumDistance: '距离 (m)',
+    sumTopSpeed: '最高速 (km/h)', sumAvgSpeed: '平均速 (km/h)', sumMinSpeed: '最低速 (km/h)',
+    sumMaxAccel: '最大加速 (m/s²)', sumMaxDecel: '最大减速 (m/s²)', sumMaxLatG: '最大横向 G',
+    sumFullThrottle: '全油门占比', sumBraking: '刹车占比', sumCoasting: '滑行占比',
+    sumElevation: '爬升 (m)', sumSamples: '采样点', sumVehicle: '车型',
+    chartSpeed: '速度 (km/h)', chartDelta: 'Δt vs 参照圈 (s)', chartInputs: '油门 / 刹车 (%)',
+    chartLatG: '横向 G', chartAccel: '纵向加速度 (m/s²)', chartGear: '档位',
+    legendGearLow: '低档', legendGearHigh: '高档',
+    legendDeltaGain: '追回时间', legendDeltaLoss: '丢失时间',
+    legendBrake: '刹车', legendThrottle: '全油门',
+    readoutHint: '把鼠标移到轨迹或曲线上查看该点数据',
+    readoutSummary: (count, reference) => `${count} 条记录 · 参照圈 ${reference}`,
+    readoutPosition: '位置', readoutTime: '时间', readoutEnded: '已结束',
+    readoutThrottle: '油', readoutBrake: '刹', readoutGear: 'G'
+  },
+  en: {
+    appTitle: 'Ghost Racer Telemetry',
+    searchPlaceholder: 'Search level / start / track',
+    rescan: 'Rescan',
+    themeAuto: 'Auto', themeLight: 'Light', themeDark: 'Dark',
+    libraries: 'Libraries',
+    pickStart: 'Pick a start',
+    catAll: 'All', catLap: 'Laps', catIncomplete: 'Incomplete', catManual: 'Manual',
+    axisLabel: 'X axis', axisDistance: 'Distance', axisTime: 'Time',
+    colorLabel: 'Trace colour',
+    mapEmpty: 'Tick a recording on the left to draw its line',
+    rootGame: 'Game saves', rootImport: 'Imports', rootMissing: 'not found',
+    rootSummary: (count, path) => `${count} libraries · ${path}`,
+    noRoots: 'No data directory configured',
+    libraryCount: (count) => `${count}`,
+    treeNoMatch: 'No library matches',
+    treeEmpty: 'No recordings found — check that -root points at the BeamNG user folder',
+    levelDetail: (libraries, laps) => `${libraries} lib · ${laps} laps`,
+    variantDetail: (count) => `${count} variants`,
+    searchExpandsAll: 'Everything is expanded while searching',
+    libraryTip: (rel, total, complete, incomplete, manual) =>
+      `${rel}\n${total} laps (complete ${complete} · incomplete ${incomplete} · manual ${manual})`,
+    lapsCount: (count) => `${count} laps`,
+    tagImport: 'IMP',
+    pointToPoint: 'point to point',
+    allVehicles: 'All vehicles',
+    sortLapTime: 'By lap time', sortRank: 'By rank', sortId: 'By record order', sortDuration: 'By duration',
+    colorSpeed: 'Speed', colorInputs: 'Throttle/brake', colorGear: 'Gear',
+    colorLatG: 'Lateral G', colorDelta: 'Δt vs reference', colorPerLap: 'Per recording',
+    lapListEmptyFiltered: 'No recording matches this filter',
+    lapListEmpty: 'This library has no recordings yet',
+    exportCsvTitle: 'Export CSV', deleteTitle: 'Delete this recording',
+    deleteConfirm: (label) => `Delete "${label}"? If BeamNG is running it may write this recording back.`,
+    deleted: 'Deleted', rescanned: 'Rescanned',
+    maxSelected: (max) => `At most ${max} recordings can be compared at once`,
+    incompleteLabel: (reason) => `incomplete${reason ? ' · ' + reason : ''}`,
+    manualLabel: 'manual', noInputs: 'no inputs',
+    chipReferenceTitle: 'Click to use as the Δt reference', chipRemoveTitle: 'Remove',
+    metric: 'Metric',
+    sumLapTime: 'Lap time', sumDuration: 'Duration (s)', sumDistance: 'Distance (m)',
+    sumTopSpeed: 'Top speed (km/h)', sumAvgSpeed: 'Average speed (km/h)', sumMinSpeed: 'Min speed (km/h)',
+    sumMaxAccel: 'Max accel (m/s²)', sumMaxDecel: 'Max decel (m/s²)', sumMaxLatG: 'Max lateral G',
+    sumFullThrottle: 'Full throttle', sumBraking: 'Braking', sumCoasting: 'Coasting',
+    sumElevation: 'Climb (m)', sumSamples: 'Samples', sumVehicle: 'Vehicle',
+    chartSpeed: 'Speed (km/h)', chartDelta: 'Δt vs reference (s)', chartInputs: 'Throttle / brake (%)',
+    chartLatG: 'Lateral G', chartAccel: 'Longitudinal accel (m/s²)', chartGear: 'Gear',
+    legendGearLow: 'low gear', legendGearHigh: 'high gear',
+    legendDeltaGain: 'gaining', legendDeltaLoss: 'losing',
+    legendBrake: 'brake', legendThrottle: 'full throttle',
+    readoutHint: 'Hover the map or a chart to read that point',
+    readoutSummary: (count, reference) => `${count} recordings · reference ${reference}`,
+    readoutPosition: 'At', readoutTime: 'Time', readoutEnded: 'ended',
+    readoutThrottle: 'thr', readoutBrake: 'brk', readoutGear: 'G'
+  }
+}
+
+const LANG_STORAGE = 'ghostRacerWeb.lang'
+const THEME_STORAGE = 'ghostRacerWeb.theme'
+
+function t(key, ...args) {
+  const table = I18N[state.lang] || I18N.en
+  const value = table[key] !== undefined ? table[key] : I18N.en[key]
+  return typeof value === 'function' ? value(...args) : value
+}
+
+function readSetting(key, fallback) {
+  try {
+    return localStorage.getItem(key) || fallback
+  } catch (error) {
+    return fallback
+  }
+}
+
+function writeSetting(key, value) {
+  try {
+    localStorage.setItem(key, value)
+  } catch (error) {
+    // Private windows refuse storage; the choice just will not persist.
+  }
+}
+
+function detectLanguage() {
+  const stored = readSetting(LANG_STORAGE, '')
+  if (stored === 'zh' || stored === 'en') return stored
+  return (navigator.language || 'en').toLowerCase().startsWith('zh') ? 'zh' : 'en'
+}
+
+// applyStaticText fills every element carrying a data-i18n hook, and rebuilds
+// the selects, whose options are built in script.
+function applyStaticText() {
+  document.documentElement.lang = state.lang === 'zh' ? 'zh-CN' : 'en'
+  document.title = t('appTitle')
+  for (const node of document.querySelectorAll('[data-i18n]')) {
+    node.textContent = t(node.dataset.i18n)
+  }
+  for (const node of document.querySelectorAll('[data-i18n-placeholder]')) {
+    node.placeholder = t(node.dataset.i18nPlaceholder)
+  }
+  fillSelect(el('sortMode'), [
+    ['lapTime', t('sortLapTime')], ['rank', t('sortRank')],
+    ['id', t('sortId')], ['duration', t('sortDuration')]
+  ], state.filters.sort)
+  fillSelect(el('colorMode'), [
+    ['speed', t('colorSpeed')], ['throttle', t('colorInputs')], ['gear', t('colorGear')],
+    ['latg', t('colorLatG')], ['delta', t('colorDelta')], ['lap', t('colorPerLap')]
+  ], state.colorMode)
+  for (const node of el('langMode').children) {
+    node.classList.toggle('active', node.dataset.lang === state.lang)
+  }
+  for (const node of el('themeMode').children) {
+    node.classList.toggle('active', node.dataset.themeMode === state.theme)
+  }
+}
+
+function fillSelect(select, options, selected) {
+  select.textContent = ''
+  for (const [value, label] of options) select.append(new Option(label, value))
+  select.value = selected
+}
+
+function setLanguage(lang) {
+  if (state.lang === lang) return
+  state.lang = lang
+  writeSetting(LANG_STORAGE, lang)
+  applyStaticText()
+  renderRootStatus()
+  renderTree()
+  if (state.activeLibrary) describeLibrary(state.activeLibrary)
+  render()
+}
+
+/* ----------------------------------------------------------------- theme */
+
+// Canvas has no cascade, so the chart colours are read out of the same CSS
+// custom properties the rest of the UI uses, and re-read when the theme flips.
+let themeColorCache = null
+
+function themeColor(name) {
+  if (!themeColorCache) {
+    themeColorCache = {}
+    const styles = getComputedStyle(document.documentElement)
+    for (const key of ['--chart-grid', '--chart-text', '--chart-zero', '--chart-cursor',
+      '--chart-dot-ring', '--chart-reference-dim']) {
+      themeColorCache[key] = styles.getPropertyValue(key).trim()
+    }
+  }
+  return themeColorCache[name]
+}
+
+function effectiveTheme() {
+  if (state.theme !== 'auto') return state.theme
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+}
+
+function applyTheme() {
+  if (state.theme === 'auto') document.documentElement.removeAttribute('data-theme')
+  else document.documentElement.dataset.theme = state.theme
+  themeColorCache = null
+  assignLapColors()
+  for (const node of el('themeMode').children) {
+    node.classList.toggle('active', node.dataset.themeMode === state.theme)
+  }
+}
+
+function setTheme(theme) {
+  state.theme = theme
+  writeSetting(THEME_STORAGE, theme)
+  applyTheme()
+  render()
+}
+
+const el = (id) => document.getElementById(id)
+const lapKey = (entry) => `${entry.key}#${entry.id}`
+
+/* ---------------------------------------------------------------- utilities */
+
+function formatTime(seconds) {
+  if (seconds == null || !isFinite(seconds)) return '—'
+  const sign = seconds < 0 ? '-' : ''
+  const value = Math.abs(seconds)
+  const minutes = Math.floor(value / 60)
+  const rest = value - minutes * 60
+  return `${sign}${minutes}:${rest.toFixed(3).padStart(6, '0')}`
+}
+
+function formatDelta(seconds) {
+  if (seconds == null || !isFinite(seconds)) return '—'
+  return `${seconds >= 0 ? '+' : ''}${seconds.toFixed(3)}`
+}
+
+function kmh(metersPerSecond) { return metersPerSecond * 3.6 }
+
+function toast(message, isError) {
+  const node = el('toast')
+  node.textContent = message
+  node.classList.toggle('error', Boolean(isError))
+  node.hidden = false
+  clearTimeout(toast.timer)
+  toast.timer = setTimeout(() => { node.hidden = true }, isError ? 6000 : 2600)
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options)
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(body.error || `${response.status} ${response.statusText}`)
+  return body
+}
+
+/* ------------------------------------------------------------ library tree */
+
+async function loadCatalog(rescan) {
+  const catalog = await api(rescan ? '/api/rescan' : '/api/catalog', rescan ? { method: 'POST' } : undefined)
+  state.catalog = catalog
+  state.libraries = catalog.libraries || []
+  renderRootStatus()
+  renderTree()
+  if (state.activeLibrary) {
+    const same = state.libraries.find((library) => library.key === state.activeLibrary.key)
+    if (same) await openLibrary(same, true)
+  }
+}
+
+function renderRootStatus() {
+  const roots = state.catalog.roots || []
+  const parts = roots.map((root) => {
+    const label = root.name === 'game' ? t('rootGame') : t('rootImport')
+    if (!root.exists) return `${label}: ${t('rootMissing')}`
+    return `${label}: ${t('rootSummary', root.count, root.path)}`
+  })
+  el('rootStatus').textContent = parts.join('　|　') || t('noRoots')
+  el('libraryCount').textContent = t('libraryCount', state.libraries.length)
+}
+
+// The sidebar mirrors the in-game hierarchy: level → saved start → track
+// variant. Groups collapse, and the open/closed state survives a reload — with
+// dozens of libraries a flat list is unusable.
+const COLLAPSE_STORAGE = 'ghostRacerWeb.tree'
+// Levels start open for a handful of maps and closed once there are many, where
+// an all-open tree is just a wall of names. An explicit click always wins and is
+// remembered per node.
+const AUTO_COLLAPSE_LEVELS = 6
+
+function loadTreeState() {
+  try {
+    return new Map(JSON.parse(localStorage.getItem(COLLAPSE_STORAGE) || '[]'))
+  } catch (error) {
+    return new Map()
+  }
+}
+
+function saveTreeState() {
+  try {
+    localStorage.setItem(COLLAPSE_STORAGE, JSON.stringify([...state.collapsed]))
+  } catch (error) {
+    // A private window can refuse storage; the tree still works for this session.
+  }
+}
+
+function nodeOpen(nodeId, fallback) {
+  return state.collapsed.has(nodeId) ? state.collapsed.get(nodeId) : fallback
+}
+
+function toggleCollapsed(nodeId, current) {
+  state.collapsed.set(nodeId, !current)
+  saveTreeState()
+  renderTree()
+}
+
+// buildTree groups the flat library list and applies the search filter. A group
+// holding a single library is flattened into a leaf so one-track starts do not
+// cost an extra level of indentation.
+function buildTree() {
+  const search = state.filters.search.toLowerCase()
+  const levels = new Map()
+
+  for (const library of state.libraries) {
+    const haystack = `${library.level} ${library.startName} ${library.startId} ${library.raceKey}`.toLowerCase()
+    if (search && !haystack.includes(search)) continue
+    if (!levels.has(library.level)) levels.set(library.level, new Map())
+    const groups = levels.get(library.level)
+    const groupKey = library.startKey || library.startId || library.rel
+    if (!groups.has(groupKey)) groups.set(groupKey, [])
+    groups.get(groupKey).push(library)
+  }
+
+  const model = []
+  for (const [level, groups] of [...levels].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const node = { level, groups: [], libraryCount: 0, lapCount: 0 }
+    for (const [groupKey, libraries] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {
+      libraries.sort((a, b) => a.startName.localeCompare(b.startName))
+      node.groups.push({
+        key: `${level}/${groupKey}`,
+        name: libraries[0].startName || groupKey,
+        libraries
+      })
+      node.libraryCount += libraries.length
+      node.lapCount += libraries.reduce((total, library) => total + library.lapCount, 0)
+    }
+    node.groups.sort((a, b) => a.name.localeCompare(b.name))
+    model.push(node)
+  }
+  return model
+}
+
+function renderTree() {
+  const tree = el('tree')
+  tree.textContent = ''
+  const model = buildTree()
+  // While searching, everything matching is shown open — hunting for a start
+  // and then having to expand it defeats the search.
+  const searching = state.filters.search.length > 0
+  const activeKey = state.activeLibrary ? state.activeLibrary.key : null
+  const levelsOpenByDefault = model.length <= AUTO_COLLAPSE_LEVELS
+
+  if (model.length === 0) {
+    const empty = document.createElement('p')
+    empty.className = 'muted'
+    empty.style.padding = '12px 8px'
+    empty.textContent = state.libraries.length ? t('treeNoMatch') : t('treeEmpty')
+    tree.append(empty)
+    return
+  }
+
+  for (const level of model) {
+    const levelId = `level:${level.level}`
+    const holdsActive = level.groups.some((group) => group.libraries.some((library) => library.key === activeKey))
+    const open = searching || holdsActive || nodeOpen(levelId, levelsOpenByDefault)
+    const levelNode = document.createElement('div')
+    levelNode.className = 'tree-node level'
+    levelNode.append(branchHeader({
+      id: levelId,
+      label: level.level,
+      detail: t('levelDetail', level.libraryCount, level.lapCount),
+      open,
+      locked: searching
+    }))
+
+    if (open) {
+      const children = document.createElement('div')
+      children.className = 'tree-children'
+      for (const group of level.groups) {
+        if (group.libraries.length === 1) {
+          children.append(libraryLeaf(group.libraries[0]))
+          continue
+        }
+        const groupId = `group:${group.key}`
+        const groupOpen = searching ||
+          group.libraries.some((library) => library.key === activeKey) ||
+          nodeOpen(groupId, true)
+        const groupNode = document.createElement('div')
+        groupNode.className = 'tree-node group'
+        groupNode.append(branchHeader({
+          id: groupId,
+          label: group.name,
+          detail: t('variantDetail', group.libraries.length),
+          open: groupOpen,
+          locked: searching
+        }))
+        if (groupOpen) {
+          const variants = document.createElement('div')
+          variants.className = 'tree-children'
+          for (const library of group.libraries) variants.append(libraryLeaf(library, true))
+          groupNode.append(variants)
+        }
+        children.append(groupNode)
+      }
+      levelNode.append(children)
+    }
+    tree.append(levelNode)
+  }
+
+  // Keep the open library visible when the tree is long.
+  const active = tree.querySelector('.tree-item.active')
+  if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest' })
+}
+
+function branchHeader({ id, label, detail, open, locked }) {
+  const header = document.createElement('button')
+  header.className = 'tree-branch'
+  header.setAttribute('aria-expanded', String(open))
+
+  const caret = document.createElement('span')
+  caret.className = 'caret'
+  caret.textContent = open ? '▾' : '▸'
+  const name = document.createElement('span')
+  name.className = 'name'
+  name.textContent = label
+  name.title = label
+  const count = document.createElement('span')
+  count.className = 'count'
+  count.textContent = detail
+  header.append(caret, name, count)
+
+  if (locked) {
+    header.disabled = true
+    header.title = t('searchExpandsAll')
+  } else {
+    header.addEventListener('click', () => toggleCollapsed(id, open))
+  }
+  return header
+}
+
+function libraryLeaf(library, nested) {
+  const item = document.createElement('div')
+  item.className = nested ? 'tree-item nested' : 'tree-item'
+  if (state.activeLibrary && state.activeLibrary.key === library.key) item.classList.add('active')
+
+  const name = document.createElement('span')
+  name.className = 'name'
+  name.textContent = library.startName || library.startId
+  name.title = t('libraryTip', library.rel, library.lapCount,
+    library.completeCount, library.incompleteCount, library.manualCount)
+  item.append(name)
+
+  if (library.pointToPoint) item.append(tag('P2P', 'p2p'))
+  if (library.kind === 'timeTrial' || library.kind === 'race') item.append(tag('TT', 'tt'))
+  if (library.root === 'import') item.append(tag(t('tagImport'), 'import'))
+
+  const count = document.createElement('span')
+  count.className = 'count'
+  count.textContent = library.bestLapTime ? formatTime(library.bestLapTime) : t('lapsCount', library.lapCount)
+  item.append(count)
+
+  item.addEventListener('click', () => openLibrary(library))
+  return item
+}
+
+function tag(text, kind) {
+  const node = document.createElement('span')
+  node.className = `tag ${kind}`
+  node.textContent = text
+  return node
+}
+
+/* --------------------------------------------------------------- lap list */
+
+async function openLibrary(library, keepSelection) {
+  state.activeLibrary = library
+  renderTree()
+  describeLibrary(library)
+
+  try {
+    const payload = await api(`/api/laps?lib=${encodeURIComponent(library.key)}`)
+    state.laps = payload.laps || []
+  } catch (error) {
+    state.laps = []
+    toast(error.message, true)
+  }
+
+  const vehicles = [...new Set(state.laps.map((lap) => lap.vehicle).filter(Boolean))].sort()
+  const filter = el('vehicleFilter')
+  const previous = filter.value
+  filter.textContent = ''
+  filter.append(new Option(t('allVehicles'), ''))
+  for (const vehicle of vehicles) filter.append(new Option(vehicle, vehicle))
+  filter.value = vehicles.includes(previous) ? previous : ''
+  state.filters.vehicle = filter.value
+
+  if (!keepSelection) {
+    state.selected = []
+    state.referenceKey = null
+    render()
+  }
+  renderLapList()
+  if (!keepSelection) {
+    // Opening a library is nearly always "show me the best lap here".
+    const best = visibleLaps().find((lap) => lap.rank === 1) || visibleLaps()[0]
+    if (best) await toggleLap(best)
+  }
+}
+
+function describeLibrary(library) {
+  el('libraryTitle').textContent = library.startName || library.startId
+  const bits = [library.level, library.rel]
+  if (library.pointToPoint) bits.push(t('pointToPoint'))
+  if (library.bestLapTime) bits.push(`PB ${formatTime(library.bestLapTime)}`)
+  el('libraryMeta').textContent = bits.join(' · ')
+}
+
+function visibleLaps() {
+  const { category, vehicle, sort } = state.filters
+  const laps = state.laps.filter((lap) => {
+    if (category !== 'all' && lap.category !== category) return false
+    if (vehicle && lap.vehicle !== vehicle) return false
+    return true
+  })
+  const sorters = {
+    lapTime: (a, b) => (a.lapTime ?? Infinity) - (b.lapTime ?? Infinity),
+    rank: (a, b) => (a.rank || 99) - (b.rank || 99),
+    id: (a, b) => Number(a.id) - Number(b.id),
+    duration: (a, b) => (b.duration || 0) - (a.duration || 0)
+  }
+  return laps.sort(sorters[sort] || sorters.lapTime)
+}
+
+function renderLapList() {
+  const list = el('lapList')
+  list.textContent = ''
+  const reference = referenceLap()
+  const laps = visibleLaps()
+  if (laps.length === 0) {
+    const row = list.insertRow()
+    const cell = row.insertCell()
+    cell.colSpan = 6
+    cell.className = 'muted'
+    cell.textContent = state.laps.length ? t('lapListEmptyFiltered') : t('lapListEmpty')
+    return
+  }
+
+  for (const lap of laps) {
+    const key = `${state.activeLibrary.key}#${lap.id}`
+    const chosen = state.selected.find((entry) => lapKey(entry) === key)
+    const row = list.insertRow()
+    row.className = chosen ? 'selected' : ''
+
+    const pick = row.insertCell()
+    pick.className = 'col-pick'
+    const box = document.createElement('input')
+    box.type = 'checkbox'
+    box.checked = Boolean(chosen)
+    box.addEventListener('change', () => toggleLap(lap))
+    pick.append(box)
+
+    const rank = row.insertCell()
+    rank.innerHTML = lap.rank
+      ? `<span class="rank ${lap.rank === 1 ? 'p1' : ''}">#${lap.rank}</span>`
+      : '<span class="rank">—</span>'
+
+    const label = row.insertCell()
+    label.className = 'col-label'
+    const swatch = document.createElement('span')
+    swatch.className = 'swatch'
+    swatch.style.background = chosen ? chosen.color : 'var(--line)'
+    label.append(swatch, document.createTextNode(lapDescription(lap)))
+    label.title = lapDescription(lap)
+
+    const time = row.insertCell()
+    time.className = 'col-time'
+    time.textContent = lap.lapTime ? formatTime(lap.lapTime) : `${(lap.duration || 0).toFixed(1)}s`
+
+    const delta = row.insertCell()
+    delta.className = 'delta-cell'
+    if (reference && reference.lapTime && lap.lapTime && lapKey(reference) !== key) {
+      const difference = lap.lapTime - reference.lapTime
+      delta.textContent = formatDelta(difference)
+      delta.classList.add(difference >= 0 ? 'pos' : 'neg')
+    }
+
+    const actions = row.insertCell()
+    actions.className = 'row-actions'
+    actions.append(iconButton('CSV', t('exportCsvTitle'), () => exportCsv(lap)))
+    actions.append(iconButton('✕', t('deleteTitle'), () => deleteLap(lap), true))
+
+    row.addEventListener('click', (event) => {
+      if (event.target.tagName === 'INPUT' || event.target.tagName === 'BUTTON') return
+      toggleLap(lap)
+    })
+  }
+}
+
+function lapDescription(lap) {
+  const bits = [lap.label || `Lap ${lap.id}`]
+  if (lap.vehicle) bits.push(lap.vehicle)
+  if (lap.category === 'incomplete') bits.push(t('incompleteLabel', lap.incompleteReason))
+  if (lap.category === 'manual') bits.push(t('manualLabel'))
+  if (lap.pinned) bits.push('📌')
+  if (!lap.hasInputs) bits.push(t('noInputs'))
+  return bits.join(' · ')
+}
+
+function iconButton(text, title, handler, danger) {
+  const button = document.createElement('button')
+  button.textContent = text
+  button.title = title
+  if (danger) button.className = 'danger'
+  button.addEventListener('click', (event) => { event.stopPropagation(); handler() })
+  return button
+}
+
+/* ------------------------------------------------------------- selection */
+
+function referenceLap() {
+  if (!state.selected.length) return null
+  return state.selected.find((entry) => lapKey(entry) === state.referenceKey) || state.selected[0]
+}
+
+async function toggleLap(lapMeta) {
+  const key = `${state.activeLibrary.key}#${lapMeta.id}`
+  const existing = state.selected.findIndex((entry) => lapKey(entry) === key)
+  if (existing >= 0) {
+    state.selected.splice(existing, 1)
+    if (state.referenceKey === key) state.referenceKey = state.selected.length ? lapKey(state.selected[0]) : null
+    render()
+    return
+  }
+  if (state.selected.length >= MAX_SELECTED) {
+    toast(t('maxSelected', MAX_SELECTED), true)
+    return
+  }
+
+  const colorIndex = nextColorIndex()
+  const entry = {
+    key: state.activeLibrary.key,
+    id: lapMeta.id,
+    colorIndex,
+    color: lapPalette()[colorIndex],
+    lap: null
+  }
+  state.selected.push(entry)
+  if (!state.referenceKey) state.referenceKey = lapKey(entry)
+  renderLapList()
+  try {
+    entry.lap = await api(`/api/lap?lib=${encodeURIComponent(entry.key)}&id=${encodeURIComponent(entry.id)}`)
+  } catch (error) {
+    state.selected = state.selected.filter((item) => item !== entry)
+    toast(error.message, true)
+  }
+  render()
+}
+
+function lapPalette() {
+  return LAP_PALETTES[effectiveTheme()] || LAP_PALETTES.dark
+}
+
+function nextColorIndex() {
+  const used = new Set(state.selected.map((entry) => entry.colorIndex))
+  for (let index = 0; index < LAP_PALETTES.dark.length; index += 1) {
+    if (!used.has(index)) return index
+  }
+  return state.selected.length % LAP_PALETTES.dark.length
+}
+
+// assignLapColors re-resolves every selected lap's colour after a theme change;
+// the slot (colorIndex) is what is stable, not the hex value.
+function assignLapColors() {
+  const colors = lapPalette()
+  for (const entry of state.selected) entry.color = colors[entry.colorIndex % colors.length]
+}
+
+function renderChips() {
+  const container = el('selectedChips')
+  container.textContent = ''
+  const reference = referenceLap()
+  for (const entry of state.selected) {
+    const chip = document.createElement('span')
+    chip.className = 'lap-chip'
+    if (reference && lapKey(reference) === lapKey(entry)) chip.classList.add('reference')
+    chip.title = t('chipReferenceTitle')
+
+    const swatch = document.createElement('span')
+    swatch.className = 'swatch'
+    swatch.style.background = entry.color
+    chip.append(swatch)
+
+    const label = entry.lap ? (entry.lap.label || `Lap ${entry.id}`) : `Lap ${entry.id} …`
+    const text = document.createElement('span')
+    text.textContent = entry.lap && entry.lap.lapTime ? `${label} ${formatTime(entry.lap.lapTime)}` : label
+    chip.append(text)
+
+    if (reference && lapKey(reference) === lapKey(entry)) {
+      const mark = document.createElement('span')
+      mark.className = 'ref-mark'
+      mark.textContent = 'REF'
+      chip.append(mark)
+    }
+
+    const drop = document.createElement('span')
+    drop.className = 'drop'
+    drop.textContent = '✕'
+    drop.title = t('chipRemoveTitle')
+    drop.addEventListener('click', (event) => {
+      event.stopPropagation()
+      state.selected = state.selected.filter((item) => lapKey(item) !== lapKey(entry))
+      if (state.referenceKey === lapKey(entry)) {
+        state.referenceKey = state.selected.length ? lapKey(state.selected[0]) : null
+      }
+      render()
+    })
+    chip.append(drop)
+
+    chip.addEventListener('click', () => {
+      state.referenceKey = lapKey(entry)
+      render()
+    })
+    container.append(chip)
+  }
+}
+
+/* ----------------------------------------------------------------- deltas */
+
+// interpolate returns series[i] at the given x, walking the (monotonic) axis.
+function interpolate(axisValues, series, x) {
+  const total = axisValues.length
+  if (total === 0) return null
+  if (x <= axisValues[0]) return series[0]
+  if (x >= axisValues[total - 1]) return series[total - 1]
+  let low = 0
+  let high = total - 1
+  while (high - low > 1) {
+    const middle = (low + high) >> 1
+    if (axisValues[middle] <= x) low = middle
+    else high = middle
+  }
+  const span = axisValues[high] - axisValues[low]
+  if (span <= 0) return series[low]
+  const ratio = (x - axisValues[low]) / span
+  return series[low] + (series[high] - series[low]) * ratio
+}
+
+function indexAt(axisValues, x) {
+  const total = axisValues.length
+  if (total === 0) return -1
+  if (x <= axisValues[0]) return 0
+  if (x >= axisValues[total - 1]) return total - 1
+  let low = 0
+  let high = total - 1
+  while (high - low > 1) {
+    const middle = (low + high) >> 1
+    if (axisValues[middle] <= x) low = middle
+    else high = middle
+  }
+  return x - axisValues[low] <= axisValues[high] - x ? low : high
+}
+
+// computeDelta builds the cumulative time difference against the reference lap,
+// sampled at this lap's own points. Laps are aligned on distance travelled from
+// the start gate, so a lap that stops short simply ends its trace early.
+function computeDelta(entry, reference) {
+  if (!entry.lap || !reference || !reference.lap || entry === reference) return null
+  const own = entry.lap.channels
+  const other = reference.lap.channels
+  if (!own.dist.length || !other.dist.length) return null
+  const delta = new Array(own.dist.length)
+  for (let i = 0; i < own.dist.length; i += 1) {
+    const referenceTime = interpolate(other.dist, other.t, own.dist[i])
+    delta[i] = own.t[i] - referenceTime
+  }
+  entry.deltaAgainst = lapKey(reference)
+  return delta
+}
+
+function refreshDeltas() {
+  const reference = referenceLap()
+  for (const entry of state.selected) {
+    entry.delta = computeDelta(entry, reference)
+  }
+}
+
+/* --------------------------------------------------------------- summary */
+
+const SUMMARY_ROWS = [
+  { key: 'sumLapTime', get: (lap) => (lap.lapTime ? formatTime(lap.lapTime) : '—') },
+  { key: 'sumDuration', get: (lap) => lap.summary.duration.toFixed(2) },
+  { key: 'sumDistance', get: (lap) => lap.summary.distance.toFixed(0) },
+  { key: 'sumTopSpeed', get: (lap) => kmh(lap.summary.topSpeed).toFixed(1) },
+  { key: 'sumAvgSpeed', get: (lap) => kmh(lap.summary.avgSpeed).toFixed(1) },
+  { key: 'sumMinSpeed', get: (lap) => kmh(lap.summary.minSpeed).toFixed(1) },
+  { key: 'sumMaxAccel', get: (lap) => lap.summary.maxAccel.toFixed(2) },
+  { key: 'sumMaxDecel', get: (lap) => lap.summary.maxDecel.toFixed(2) },
+  { key: 'sumMaxLatG', get: (lap) => lap.summary.maxLatG.toFixed(2) },
+  { key: 'sumFullThrottle', get: (lap) => (lap.hasInputs ? `${lap.summary.fullThrottlePct.toFixed(1)}%` : '—') },
+  { key: 'sumBraking', get: (lap) => (lap.hasInputs ? `${lap.summary.brakingPct.toFixed(1)}%` : '—') },
+  { key: 'sumCoasting', get: (lap) => (lap.hasInputs ? `${lap.summary.coastingPct.toFixed(1)}%` : '—') },
+  { key: 'sumElevation', get: (lap) => lap.summary.elevationGain.toFixed(0) },
+  { key: 'sumSamples', get: (lap) => String(lap.summary.sampleCount) },
+  { key: 'sumVehicle', get: (lap) => lap.vehicle || '—' }
+]
+
+function renderSummary() {
+  const container = el('summaryTable')
+  container.textContent = ''
+  const loaded = state.selected.filter((entry) => entry.lap)
+  if (!loaded.length) return
+
+  const table = document.createElement('table')
+  const head = table.createTHead().insertRow()
+  head.insertCell().outerHTML = `<th>${t('metric')}</th>`
+  for (const entry of loaded) {
+    const cell = document.createElement('th')
+    const swatch = document.createElement('span')
+    swatch.className = 'swatch'
+    swatch.style.background = entry.color
+    cell.append(swatch, document.createTextNode(entry.lap.label || `Lap ${entry.id}`))
+    head.append(cell)
+  }
+
+  const body = table.createTBody()
+  for (const definition of SUMMARY_ROWS) {
+    const row = body.insertRow()
+    row.insertCell().textContent = t(definition.key)
+    for (const entry of loaded) row.insertCell().textContent = definition.get(entry.lap)
+  }
+  container.append(table)
+}
+
+/* ------------------------------------------------------- export / delete */
+
+function exportCsv(lapMeta) {
+  const entry = state.selected.find((item) => lapKey(item) === `${state.activeLibrary.key}#${lapMeta.id}`)
+  const load = entry && entry.lap
+    ? Promise.resolve(entry.lap)
+    : api(`/api/lap?lib=${encodeURIComponent(state.activeLibrary.key)}&id=${encodeURIComponent(lapMeta.id)}`)
+
+  load.then((lap) => {
+    const channels = lap.channels
+    const columns = ['t', 'dist', 'x', 'y', 'z', 'speed', 'accel', 'latG', 'heading']
+    if (lap.hasInputs) columns.push('throttle', 'brake', 'gear', 'handbrake', 'clutch')
+    const lines = [columns.join(',')]
+    for (let i = 0; i < channels.t.length; i += 1) {
+      lines.push(columns.map((column) => channels[column][i]).join(','))
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = `${lap.level}-${lap.startName || 'start'}-lap${lap.id}.csv`.replace(/[^\w.\-]+/g, '_')
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000)
+  }).catch((error) => toast(error.message, true))
+}
+
+async function deleteLap(lapMeta) {
+  if (!confirm(t('deleteConfirm', lapMeta.label || lapMeta.id))) return
+  try {
+    await api(`/api/lap?lib=${encodeURIComponent(state.activeLibrary.key)}&id=${encodeURIComponent(lapMeta.id)}`,
+      { method: 'DELETE' })
+    state.selected = state.selected.filter((entry) => lapKey(entry) !== `${state.activeLibrary.key}#${lapMeta.id}`)
+    toast(t('deleted'))
+    await loadCatalog(true)
+    await openLibrary(state.activeLibrary, true)
+    render()
+  } catch (error) {
+    toast(error.message, true)
+  }
+}
+
+/* ------------------------------------------------------------- rendering */
+
+/*
+ * Drawing is split into a static layer and a cursor overlay. The traces, grids
+ * and labels are painted once into an offscreen canvas keyed by everything that
+ * can change them; moving the mouse only blits that bitmap and draws the
+ * crosshair. Without this, one mousemove redrew ~100k points across seven
+ * canvases.
+ */
+
+const SPEED_RAMP = ['#2b6cff', '#22c1c3', '#3ddc97', '#ffd23d', '#ff8b3d', '#ff4d4d']
+const DIVERGING = ['#4dd6ff', '#2b6cff', '#4a5568', '#ff8b3d', '#ff4d4d']
+const THROTTLE_RAMP = ['#1f7a4d', '#3ddc97']
+const BRAKE_RAMP = ['#ff8b3d', '#ff2d2d']
+const COAST_COLOR = '#5a6675'
+const PALETTE_STEPS = 32
+
+const paletteCache = new Map()
+
+// palette quantizes a gradient into fixed steps. Colours then compare as small
+// integers, so a trace can be batched into one path per step instead of one
+// stroke per sample.
+function palette(ramp) {
+  const cacheKey = ramp.join('')
+  let colors = paletteCache.get(cacheKey)
+  if (colors) return colors
+  colors = []
+  for (let step = 0; step < PALETTE_STEPS; step += 1) {
+    colors.push(mixRamp(ramp, step / (PALETTE_STEPS - 1)))
+  }
+  paletteCache.set(cacheKey, colors)
+  return colors
+}
+
+function bucket(ratio) {
+  const clamped = ratio <= 0 ? 0 : ratio >= 1 ? 1 : ratio
+  return Math.round(clamped * (PALETTE_STEPS - 1))
+}
+
+function rampColor(ramp, ratio) { return palette(ramp)[bucket(ratio)] }
+
+function mixRamp(ramp, ratio) {
+  const scaled = Math.max(0, Math.min(1, ratio)) * (ramp.length - 1)
+  const index = Math.min(ramp.length - 2, Math.floor(scaled))
+  return mixHex(ramp[index], ramp[index + 1], scaled - index)
+}
+
+function mixHex(from, to, ratio) {
+  const parse = (hex) => [1, 3, 5].map((offset) => parseInt(hex.slice(offset, offset + 2), 16))
+  const [r1, g1, b1] = parse(from)
+  const [r2, g2, b2] = parse(to)
+  const blend = (a, b) => Math.round(a + (b - a) * ratio)
+  return `rgb(${blend(r1, r2)},${blend(g1, g2)},${blend(b1, b2)})`
+}
+
+function axisValues(lap) {
+  return state.axis === 'dist' ? lap.channels.dist : lap.channels.t
+}
+
+function axisMax() {
+  let max = 0
+  for (const entry of state.selected) {
+    if (!entry.lap) continue
+    const values = axisValues(entry.lap)
+    if (values.length) max = Math.max(max, values[values.length - 1])
+  }
+  return max || 1
+}
+
+function loadedEntries() {
+  return state.selected.filter((entry) => entry.lap && entry.lap.channels.t.length)
+}
+
+// selectionSignature captures which laps are drawn, in which colours. The
+// reference lap is added only by the layers that actually depend on it (the map
+// and the Δt chart), so switching REF does not repaint every channel.
+function selectionSignature() {
+  return state.selected
+    .map((entry) => `${lapKey(entry)}:${entry.color}:${entry.lap ? entry.lap.summary.sampleCount : 0}`)
+    .join('|')
+}
+
+function fitCanvas(canvas, cssHeight) {
+  const ratio = window.devicePixelRatio || 1
+  const width = canvas.parentElement.clientWidth
+  const height = cssHeight || canvas.parentElement.clientHeight
+  const pixelWidth = Math.max(1, Math.round(width * ratio))
+  const pixelHeight = Math.max(1, Math.round(height * ratio))
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth
+    canvas.height = pixelHeight
+  }
+  canvas.style.height = `${height}px`
+  const context = canvas.getContext('2d')
+  context.setTransform(ratio, 0, 0, ratio, 0, 0)
+  return { context, width, height, ratio }
+}
+
+// ensureLayer repaints the offscreen buffer only when its key or size changed.
+function ensureLayer(holder, width, height, ratio, key, paint) {
+  if (holder.key === key && holder.width === width && holder.height === height && holder.ratio === ratio) {
+    return holder.canvas
+  }
+  const buffer = holder.canvas || document.createElement('canvas')
+  buffer.width = Math.max(1, Math.round(width * ratio))
+  buffer.height = Math.max(1, Math.round(height * ratio))
+  const context = buffer.getContext('2d')
+  context.setTransform(ratio, 0, 0, ratio, 0, 0)
+  context.clearRect(0, 0, width, height)
+  paint(context)
+  Object.assign(holder, { canvas: buffer, key, width, height, ratio })
+  return buffer
+}
+
+/* ------------------------------------------------------------- track map */
+
+const mapLayer = { canvas: null, key: '', width: 0, height: 0, ratio: 0 }
+
+function colorScales() {
+  let speedMin = Infinity
+  let speedMax = -Infinity
+  let latgMax = 0.1
+  let deltaRate = 0.02
+  for (const entry of loadedEntries()) {
+    speedMin = Math.min(speedMin, entry.lap.summary.minSpeed)
+    speedMax = Math.max(speedMax, entry.lap.summary.topSpeed)
+    latgMax = Math.max(latgMax, entry.lap.summary.maxLatG)
+    if (entry.delta) {
+      for (let i = 25; i < entry.delta.length; i += 5) {
+        deltaRate = Math.max(deltaRate, Math.abs(entry.delta[i] - entry.delta[i - 25]))
+      }
+    }
+  }
+  if (!isFinite(speedMin)) { speedMin = 0; speedMax = 1 }
+  return { speedMin, speedMax, speedSpan: speedMax - speedMin, latgMax, deltaRate }
+}
+
+// pointColorKey returns a small integer identifying a sample's colour, so runs
+// of equal colour are found by integer comparison. colorForKey turns it back
+// into a CSS colour once per run.
+function pointColorKey(entry, index, scales) {
+  const channels = entry.lap.channels
+  switch (state.colorMode) {
+    case 'speed':
+      return bucket((channels.speed[index] - scales.speedMin) / (scales.speedSpan || 1))
+    case 'throttle':
+      if (!entry.lap.hasInputs) return -1
+      if (channels.brake[index] > 0.05) return 100 + bucket(channels.brake[index])
+      if (channels.throttle[index] > 0.05) return 200 + bucket(channels.throttle[index])
+      return 300
+    case 'gear':
+      if (!entry.lap.hasInputs) return -1
+      return bucket(Math.max(0, Math.min(8, channels.gear[index])) / 8)
+    case 'latg':
+      return bucket(0.5 + channels.latG[index] / (2 * (scales.latgMax || 1)))
+    case 'delta': {
+      if (!entry.delta) return -1
+      const rate = entry.delta[index] - (entry.delta[Math.max(0, index - 25)] || 0)
+      return bucket(0.5 + rate / (2 * (scales.deltaRate || 0.05)))
+    }
+    default:
+      return -1
+  }
+}
+
+function colorForKey(key, entry) {
+  if (key < 0) return entry.color
+  if (key === 300) return COAST_COLOR
+  if (key >= 200) return palette(THROTTLE_RAMP)[key - 200]
+  if (key >= 100) return palette(BRAKE_RAMP)[key - 100]
+  return palette(state.colorMode === 'latg' || state.colorMode === 'delta' ? DIVERGING : SPEED_RAMP)[key]
+}
+
+function mapProjection(entries, width, height) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const entry of entries) {
+    const [x0, y0, x1, y1] = entry.lap.summary.bounds
+    minX = Math.min(minX, x0); minY = Math.min(minY, y0)
+    maxX = Math.max(maxX, x1); maxY = Math.max(maxY, y1)
+  }
+  const padding = 26
+  const spanX = Math.max(1, maxX - minX)
+  const spanY = Math.max(1, maxY - minY)
+  const scale = Math.min((width - padding * 2) / spanX, (height - padding * 2) / spanY)
+  const offsetX = (width - spanX * scale) / 2
+  const offsetY = (height - spanY * scale) / 2
+  // BeamNG world Y grows north; canvas Y grows down.
+  return {
+    scale,
+    project: (x, y) => [offsetX + (x - minX) * scale, height - (offsetY + (y - minY) * scale)]
+  }
+}
+
+// projectEntries caches screen coordinates per lap. The hover search and the
+// cursor dots then read plain typed arrays instead of re-projecting.
+function projectEntries(entries, projection) {
+  return entries.map((entry) => {
+    const channels = entry.lap.channels
+    const total = channels.x.length
+    const points = new Float32Array(total * 2)
+    for (let i = 0; i < total; i += 1) {
+      const [px, py] = projection.project(channels.x[i], channels.y[i])
+      points[i * 2] = px
+      points[i * 2 + 1] = py
+    }
+    return { entry, points, total }
+  })
+}
+
+function drawMap() {
+  const canvas = el('map')
+  const entries = loadedEntries()
+  el('mapEmpty').hidden = entries.length > 0
+  const { context, width, height, ratio } = fitCanvas(canvas)
+  context.clearRect(0, 0, width, height)
+  if (!entries.length) {
+    el('mapLegend').textContent = ''
+    state.mapProjected = null
+    return
+  }
+
+  const key = [width, height, state.colorMode, state.referenceKey, state.lang, effectiveTheme(),
+    selectionSignature()].join('~')
+  const scales = colorScales()
+  if (mapLayer.key !== key || mapLayer.width !== width || mapLayer.height !== height || mapLayer.ratio !== ratio) {
+    const projection = mapProjection(entries, width, height)
+    state.mapProjection = projection
+    state.mapProjected = projectEntries(entries, projection)
+  }
+  const buffer = ensureLayer(mapLayer, width, height, ratio, key, (target) => {
+    for (const projected of state.mapProjected) paintTrace(target, projected, scales)
+    paintGates(target, state.mapProjection, entries)
+  })
+
+  context.drawImage(buffer, 0, 0, width, height)
+  drawMapCursor(context)
+  renderLegend(scales)
+}
+
+function paintTrace(context, projected, scales) {
+  const { entry, points, total } = projected
+  const reference = referenceLap()
+  const isReference = reference && lapKey(reference) === lapKey(entry)
+  const flat = state.colorMode === 'lap' || (state.colorMode === 'delta' && isReference)
+
+  context.lineWidth = isReference ? 2.6 : 1.9
+  context.lineJoin = 'round'
+  context.lineCap = 'round'
+
+  if (flat) {
+    context.strokeStyle = state.colorMode === 'delta' && isReference
+      ? themeColor('--chart-reference-dim')
+      : entry.color
+    context.beginPath()
+    context.moveTo(points[0], points[1])
+    let lastX = points[0]
+    let lastY = points[1]
+    for (let i = 1; i < total; i += 1) {
+      const x = points[i * 2]
+      const y = points[i * 2 + 1]
+      // Sub-pixel steps are invisible but cost a line segment each.
+      if (i < total - 1 && (x - lastX) ** 2 + (y - lastY) ** 2 < 0.8) continue
+      context.lineTo(x, y)
+      lastX = x
+      lastY = y
+    }
+    context.stroke()
+    return
+  }
+
+  let runKey = pointColorKey(entry, 0, scales)
+  let lastX = points[0]
+  let lastY = points[1]
+  context.beginPath()
+  context.moveTo(lastX, lastY)
+  for (let i = 1; i < total; i += 1) {
+    const x = points[i * 2]
+    const y = points[i * 2 + 1]
+    const key = pointColorKey(entry, i, scales)
+    const far = (x - lastX) ** 2 + (y - lastY) ** 2 >= 0.8
+    if (key === runKey) {
+      if (!far && i < total - 1) continue
+      context.lineTo(x, y)
+    } else {
+      // Close the run on the new point so the colours meet without a gap.
+      context.lineTo(x, y)
+      context.strokeStyle = colorForKey(runKey, entry)
+      context.stroke()
+      context.beginPath()
+      context.moveTo(x, y)
+      runKey = key
+    }
+    lastX = x
+    lastY = y
+  }
+  context.strokeStyle = colorForKey(runKey, entry)
+  context.stroke()
+}
+
+function paintGates(context, projection, entries) {
+  const startLine = entries.map((entry) => entry.lap.startLine).find(Boolean)
+  const library = state.activeLibrary
+  if (startLine && startLine.position) {
+    paintGate(context, projection, startLine.position, startLine.normal, startLine.halfWidth || 8, '#3ddc97', 'START')
+  } else if (library && library.position) {
+    paintGate(context, projection, library.position, [0, 1, 0], 8, '#3ddc97', 'START')
+  }
+  if (library && library.finishPosition) {
+    paintGate(context, projection, library.finishPosition, [1, 0, 0], 8, '#ffd23d', 'FINISH')
+  }
+}
+
+function paintGate(context, projection, position, normal, halfWidth, color, label) {
+  const nx = normal[0] || 0
+  const ny = normal[1] || 0
+  const length = Math.hypot(nx, ny) || 1
+  // The gate line is perpendicular to the normal a car crosses it along.
+  const tx = -ny / length
+  const ty = nx / length
+  const [ax, ay] = projection.project(position[0] - tx * halfWidth, position[1] - ty * halfWidth)
+  const [bx, by] = projection.project(position[0] + tx * halfWidth, position[1] + ty * halfWidth)
+  context.strokeStyle = color
+  context.lineWidth = 2
+  context.setLineDash([4, 3])
+  context.beginPath()
+  context.moveTo(ax, ay)
+  context.lineTo(bx, by)
+  context.stroke()
+  context.setLineDash([])
+  context.fillStyle = color
+  context.font = '10px ui-monospace, monospace'
+  context.fillText(label, bx + 4, by)
+}
+
+function drawMapCursor(context) {
+  if (state.cursorX == null || !state.mapProjected) return
+  for (const { entry, points } of state.mapProjected) {
+    const values = axisValues(entry.lap)
+    const index = indexAt(values, state.cursorX)
+    if (index < 0) continue
+    context.beginPath()
+    context.arc(points[index * 2], points[index * 2 + 1], 4.5, 0, Math.PI * 2)
+    context.fillStyle = entry.color
+    context.fill()
+    context.lineWidth = 1.5
+    context.strokeStyle = themeColor('--chart-dot-ring')
+    context.stroke()
+  }
+}
+
+function renderLegend(scales) {
+  const legend = el('mapLegend')
+  const labels = {
+    speed: [`${kmh(scales.speedMin).toFixed(0)} km/h`, `${kmh(scales.speedMax).toFixed(0)} km/h`, SPEED_RAMP],
+    gear: [t('legendGearLow'), t('legendGearHigh'), SPEED_RAMP],
+    latg: [`-${scales.latgMax.toFixed(1)} G`, `+${scales.latgMax.toFixed(1)} G`, DIVERGING],
+    delta: [t('legendDeltaGain'), t('legendDeltaLoss'), DIVERGING],
+    throttle: [t('legendBrake'), t('legendThrottle'), ['#ff2d2d', COAST_COLOR, '#3ddc97']],
+    lap: null
+  }
+  const definition = labels[state.colorMode]
+  const signature = definition ? `${state.lang}:${state.colorMode}:${definition[0]}:${definition[1]}` : 'none'
+  if (legend.dataset.signature === signature) return
+  legend.dataset.signature = signature
+  legend.textContent = ''
+  if (!definition) return
+
+  const [low, high, ramp] = definition
+  const bar = document.createElement('span')
+  bar.className = 'bar'
+  bar.style.background = `linear-gradient(90deg, ${ramp.join(',')})`
+  const lowLabel = document.createElement('span')
+  lowLabel.textContent = low
+  const highLabel = document.createElement('span')
+  highLabel.textContent = high
+  legend.append(lowLabel, bar, highLabel)
+}
+
+/* ---------------------------------------------------------------- charts */
+
+const CHART_DEFS = [
+  {
+    id: 'speed', labelKey: 'chartSpeed', height: 118,
+    series: (entry) => [{ values: cached(entry, 'speed', (lap) => lap.channels.speed.map(kmh)), color: entry.color }]
+  },
+  {
+    id: 'delta', labelKey: 'chartDelta', height: 108, zeroLine: true,
+    enabled: () => loadedEntries().length > 1,
+    series: (entry) => (entry.delta ? [{ values: entry.delta, color: entry.color }] : [])
+  },
+  {
+    id: 'inputs', labelKey: 'chartInputs', height: 104, domain: [0, 100],
+    enabled: () => state.selected.some((entry) => entry.lap && entry.lap.hasInputs),
+    series: (entry) => (entry.lap.hasInputs ? [
+      { values: cached(entry, 'throttle', (lap) => lap.channels.throttle.map((v) => v * 100)), color: entry.color },
+      { values: cached(entry, 'brake', (lap) => lap.channels.brake.map((v) => v * 100)), color: entry.color, dash: [3, 3] }
+    ] : [])
+  },
+  {
+    id: 'latg', labelKey: 'chartLatG', height: 96, zeroLine: true,
+    series: (entry) => [{ values: entry.lap.channels.latG, color: entry.color }]
+  },
+  {
+    id: 'accel', labelKey: 'chartAccel', height: 96, zeroLine: true,
+    series: (entry) => [{ values: entry.lap.channels.accel, color: entry.color }]
+  },
+  {
+    id: 'gear', labelKey: 'chartGear', height: 84, step: true,
+    enabled: () => state.selected.some((entry) => entry.lap && entry.lap.hasInputs),
+    series: (entry) => (entry.lap.hasInputs ? [{ values: entry.lap.channels.gear, color: entry.color }] : [])
+  }
+]
+
+// cached memoizes a derived series on the selection entry; channel data never
+// changes once loaded, so this survives every cursor redraw.
+function cached(entry, name, build) {
+  entry.cache = entry.cache || {}
+  if (!entry.cache[name]) entry.cache[name] = build(entry.lap)
+  return entry.cache[name]
+}
+
+function activeCharts() {
+  return CHART_DEFS.filter((definition) => !definition.enabled || definition.enabled())
+}
+
+function buildCharts() {
+  const container = el('charts')
+  const definitions = activeCharts()
+  const signature = definitions.map((definition) => definition.id).join(',')
+  if (container.dataset.signature === signature) return
+  container.dataset.signature = signature
+  container.textContent = ''
+  state.charts = definitions.map((definition) => {
+    const wrapper = document.createElement('div')
+    wrapper.className = 'chart'
+    const canvas = document.createElement('canvas')
+    wrapper.append(canvas)
+    container.append(wrapper)
+    attachCursor(canvas)
+    return { definition, canvas, layer: { canvas: null, key: '', width: 0, height: 0, ratio: 0 } }
+  })
+}
+
+function drawCharts() {
+  const entries = loadedEntries()
+  const maxX = axisMax()
+  for (let i = 0; i < state.charts.length; i += 1) {
+    drawChart(state.charts[i], entries, maxX, i === state.charts.length - 1)
+  }
+}
+
+function drawChart(chart, entries, maxX, isLast) {
+  const { definition, canvas } = chart
+  const { context, width, height, ratio } = fitCanvas(canvas, definition.height)
+  context.clearRect(0, 0, width, height)
+
+  // Only the Δt chart is drawn against the reference lap.
+  const reference = definition.id === 'delta' ? state.referenceKey : ''
+  const key = [definition.id, width, height, state.axis, maxX, isLast, reference,
+    state.lang, effectiveTheme(), selectionSignature()].join('~')
+  if (chart.layer.key !== key || chart.layer.width !== width || chart.layer.height !== height) {
+    prepareChart(chart, entries, maxX, isLast, width, height)
+  }
+  const buffer = ensureLayer(chart.layer, width, height, ratio, key, (target) => paintChart(target, chart, isLast))
+  context.drawImage(buffer, 0, 0, width, height)
+  drawChartCursor(context, chart)
+}
+
+// prepareChart resolves the series and the value domain once, so a cursor move
+// never walks the samples again.
+function prepareChart(chart, entries, maxX, isLast, width, height) {
+  const { definition } = chart
+  const left = 46
+  const right = 8
+  const top = 16
+  const bottom = isLast ? 20 : 10
+  const plotWidth = Math.max(1, width - left - right)
+  const plotHeight = Math.max(1, height - top - bottom)
+
+  const series = []
+  for (const entry of entries) {
+    for (const item of definition.series(entry)) {
+      if (item.values && item.values.length) series.push({ ...item, entry })
+    }
+  }
+
+  let low = definition.domain ? definition.domain[0] : Infinity
+  let high = definition.domain ? definition.domain[1] : -Infinity
+  if (!definition.domain) {
+    for (const item of series) {
+      for (const value of item.values) {
+        if (!isFinite(value)) continue
+        if (value < low) low = value
+        if (value > high) high = value
+      }
+    }
+    if (!isFinite(low)) { low = 0; high = 1 }
+    if (definition.zeroLine) {
+      const reach = Math.max(Math.abs(low), Math.abs(high)) || 1
+      low = -reach
+      high = reach
+    }
+    const pad = (high - low) * 0.08 || 1
+    low -= pad
+    high += pad
+  }
+
+  chart.series = series
+  chart.geometry = {
+    left, top, plotWidth, plotHeight, maxX, low, high,
+    xAt: (value) => left + (value / maxX) * plotWidth,
+    yAt: (value) => top + plotHeight - ((value - low) / (high - low || 1)) * plotHeight
+  }
+}
+
+function paintChart(context, chart, isLast) {
+  const { definition, series, geometry } = chart
+  const { left, top, plotWidth, plotHeight, maxX, low, high } = geometry
+
+  context.strokeStyle = themeColor('--chart-grid')
+  context.lineWidth = 1
+  context.beginPath()
+  for (let i = 0; i <= 4; i += 1) {
+    const y = Math.round(top + (plotHeight * i) / 4) + 0.5
+    context.moveTo(left, y)
+    context.lineTo(left + plotWidth, y)
+  }
+  for (let i = 0; i <= 6; i += 1) {
+    const x = Math.round(left + (plotWidth * i) / 6) + 0.5
+    context.moveTo(x, top)
+    context.lineTo(x, top + plotHeight)
+  }
+  context.stroke()
+
+  context.fillStyle = themeColor('--chart-text')
+  context.font = '10px ui-monospace, monospace'
+  context.textAlign = 'left'
+  context.fillText(t(definition.labelKey), left, 11)
+  context.textAlign = 'right'
+  context.fillText(formatAxisValue(high), left - 6, top + 8)
+  context.fillText(formatAxisValue(low), left - 6, top + plotHeight)
+  context.fillText(formatAxisValue((low + high) / 2), left - 6, top + plotHeight / 2 + 3)
+
+  if (definition.zeroLine && low < 0 && high > 0) {
+    context.strokeStyle = themeColor('--chart-zero')
+    context.beginPath()
+    const zero = Math.round(geometry.yAt(0)) + 0.5
+    context.moveTo(left, zero)
+    context.lineTo(left + plotWidth, zero)
+    context.stroke()
+  }
+
+  if (isLast) {
+    context.textAlign = 'center'
+    for (let i = 0; i <= 6; i += 1) {
+      const value = (maxX * i) / 6
+      const text = state.axis === 'dist' ? `${value.toFixed(0)}m` : `${value.toFixed(1)}s`
+      context.fillText(text, left + (plotWidth * i) / 6, top + plotHeight + 14)
+    }
+  }
+
+  context.lineWidth = 1.5
+  // Bevel joins on a near-vertical envelope look identical to round ones and
+  // cost far less to rasterize; a lap can contribute thousands of joins.
+  context.lineJoin = 'bevel'
+  context.lineCap = 'butt'
+  for (const item of series) paintSeries(context, item, chart)
+  context.setLineDash([])
+}
+
+// paintSeries draws one channel. When a lap carries more samples than the plot
+// has pixels, each column is reduced to its min/max — that keeps braking spikes
+// visible, which plain stride sampling drops.
+function paintSeries(context, item, chart) {
+  const { definition, geometry } = chart
+  const { left, plotWidth, maxX, xAt, yAt } = geometry
+  const axis = axisValues(item.entry.lap)
+  const total = Math.min(axis.length, item.values.length)
+  context.strokeStyle = item.color
+  context.setLineDash(item.dash || [])
+  context.beginPath()
+
+  const columns = Math.max(1, Math.round(plotWidth))
+  if (!definition.step && total > columns * 2) {
+    const minima = new Float32Array(columns).fill(Infinity)
+    const maxima = new Float32Array(columns).fill(-Infinity)
+    for (let i = 0; i < total; i += 1) {
+      const value = item.values[i]
+      if (!isFinite(value)) continue
+      let column = Math.floor((axis[i] / maxX) * columns)
+      if (column < 0) column = 0
+      else if (column >= columns) column = columns - 1
+      if (value < minima[column]) minima[column] = value
+      if (value > maxima[column]) maxima[column] = value
+    }
+    let started = false
+    for (let column = 0; column < columns; column += 1) {
+      if (minima[column] === Infinity) continue
+      const x = left + column
+      const high = yAt(maxima[column])
+      const low = yAt(minima[column])
+      if (!started) {
+        context.moveTo(x, high)
+        started = true
+      } else {
+        context.lineTo(x, high)
+      }
+      // Only spend a second vertex where the column really spans some height.
+      if (low - high > 0.75) context.lineTo(x, low)
+    }
+    context.stroke()
+    return
+  }
+
+  const stride = Math.max(1, Math.floor(total / (columns * 2)))
+  let previousY = null
+  for (let i = 0; i < total; i += stride) {
+    const value = item.values[i]
+    if (!isFinite(value)) continue
+    const x = xAt(axis[i])
+    const y = yAt(value)
+    if (previousY == null) {
+      context.moveTo(x, y)
+    } else if (definition.step) {
+      // Gears hold until they change; a sloped line would invent shifts.
+      context.lineTo(x, previousY)
+      context.lineTo(x, y)
+    } else {
+      context.lineTo(x, y)
+    }
+    previousY = y
+  }
+  context.stroke()
+}
+
+function drawChartCursor(context, chart) {
+  const { geometry, series } = chart
+  if (!geometry || state.cursorX == null) return
+  const { left, top, plotWidth, plotHeight, maxX, xAt, yAt } = geometry
+  if (state.cursorX < 0 || state.cursorX > maxX) return
+
+  const x = Math.round(xAt(state.cursorX)) + 0.5
+  context.strokeStyle = themeColor('--chart-cursor')
+  context.lineWidth = 1
+  context.beginPath()
+  context.moveTo(x, top)
+  context.lineTo(x, top + plotHeight)
+  context.stroke()
+  void left
+  void plotWidth
+
+  for (const item of series) {
+    const axis = axisValues(item.entry.lap)
+    if (axis[axis.length - 1] < state.cursorX) continue
+    const index = indexAt(axis, state.cursorX)
+    if (index < 0 || !isFinite(item.values[index])) continue
+    context.fillStyle = item.color
+    context.beginPath()
+    context.arc(xAt(axis[index]), yAt(item.values[index]), 2.6, 0, Math.PI * 2)
+    context.fill()
+  }
+}
+
+function formatAxisValue(value) {
+  if (Math.abs(value) >= 100) return value.toFixed(0)
+  if (Math.abs(value) >= 10) return value.toFixed(1)
+  return value.toFixed(2)
+}
+
+/* ---------------------------------------------------------------- cursor */
+
+function attachCursor(canvas) {
+  canvas.addEventListener('mousemove', (event) => {
+    const chart = state.charts.find((item) => item.canvas === canvas)
+    if (!chart || !chart.geometry) return
+    const rect = canvas.getBoundingClientRect()
+    const { left, plotWidth, maxX } = chart.geometry
+    const ratio = (event.clientX - rect.left - left) / plotWidth
+    setCursor(Math.max(0, Math.min(maxX, ratio * maxX)))
+  })
+  canvas.addEventListener('mouseleave', () => setCursor(null))
+}
+
+function attachMapCursor() {
+  const canvas = el('map')
+  canvas.addEventListener('mousemove', (event) => {
+    if (!state.mapProjected) return
+    const rect = canvas.getBoundingClientRect()
+    const pointerX = event.clientX - rect.left
+    const pointerY = event.clientY - rect.top
+    let best = null
+    // Coordinates were projected once when the static layer was built, so this
+    // is a scan over cached floats: coarse pass, then a refine around the hit.
+    for (const { entry, points, total } of state.mapProjected) {
+      let bestIndex = -1
+      let bestDistance = Infinity
+      const coarse = Math.max(1, Math.floor(total / 400))
+      for (let i = 0; i < total; i += coarse) {
+        const dx = points[i * 2] - pointerX
+        const dy = points[i * 2 + 1] - pointerY
+        const distance = dx * dx + dy * dy
+        if (distance < bestDistance) { bestDistance = distance; bestIndex = i }
+      }
+      for (let i = Math.max(0, bestIndex - coarse); i < Math.min(total, bestIndex + coarse); i += 1) {
+        const dx = points[i * 2] - pointerX
+        const dy = points[i * 2 + 1] - pointerY
+        const distance = dx * dx + dy * dy
+        if (distance < bestDistance) { bestDistance = distance; bestIndex = i }
+      }
+      if (bestIndex >= 0 && bestDistance < (best ? best.distance : Infinity)) {
+        best = { entry, index: bestIndex, distance: bestDistance }
+      }
+    }
+    if (!best || best.distance > 40 ** 2) return
+    state.hoverLapKey = lapKey(best.entry)
+    setCursor(axisValues(best.entry.lap)[best.index])
+  })
+  canvas.addEventListener('mouseleave', () => setCursor(null))
+}
+
+function setCursor(value) {
+  if (state.cursorX === value) return
+  state.cursorX = value
+  scheduleRedraw()
+}
+
+let redrawHandle = null
+function scheduleRedraw() {
+  if (redrawHandle) return
+  redrawHandle = requestAnimationFrame(() => {
+    redrawHandle = null
+    drawMap()
+    drawCharts()
+    renderReadout()
+  })
+}
+
+function renderReadout() {
+  const readout = el('readout')
+  const entries = loadedEntries()
+  if (!entries.length) {
+    readout.textContent = t('readoutHint')
+    return
+  }
+  if (state.cursorX == null) {
+    const reference = referenceLap()
+    readout.textContent = t('readoutSummary', entries.length,
+      reference && reference.lap ? (reference.lap.label || reference.id) : '—')
+    return
+  }
+
+  readout.textContent = ''
+  const head = document.createElement('span')
+  head.innerHTML = state.axis === 'dist'
+    ? `${t('readoutPosition')} <b>${state.cursorX.toFixed(0)} m</b>`
+    : `${t('readoutTime')} <b>${state.cursorX.toFixed(2)} s</b>`
+  readout.append(head)
+
+  for (const entry of entries) {
+    const channels = entry.lap.channels
+    const values = axisValues(entry.lap)
+    const index = indexAt(values, state.cursorX)
+    if (index < 0) continue
+    const beyond = values[values.length - 1] < state.cursorX
+    const span = document.createElement('span')
+    const parts = [`<b style="color:${entry.color}">■</b>`]
+    if (beyond) {
+      parts.push(`<span style="opacity:.5">${t('readoutEnded')}</span>`)
+    } else {
+      parts.push(`<b>${kmh(channels.speed[index]).toFixed(1)}</b>km/h`)
+      if (entry.lap.hasInputs) {
+        parts.push(`${t('readoutThrottle')}<b>${(channels.throttle[index] * 100).toFixed(0)}</b>`)
+        parts.push(`${t('readoutBrake')}<b>${(channels.brake[index] * 100).toFixed(0)}</b>`)
+        parts.push(`${t('readoutGear')}<b>${channels.gear[index].toFixed(0)}</b>`)
+      }
+      parts.push(`${channels.latG[index].toFixed(2)}G`)
+      if (entry.delta) {
+        const delta = entry.delta[index]
+        parts.push(`<b class="${delta >= 0 ? 'pos' : 'neg'}">${formatDelta(delta)}</b>`)
+      }
+    }
+    span.innerHTML = parts.join(' ')
+    readout.append(span)
+  }
+}
+
+/* -------------------------------------------------------------- deep link */
+
+// The hash carries the current view so a specific comparison can be linked or
+// reloaded: #lib=<key>&laps=1,3&axis=dist&color=speed&ref=3
+function writeHash() {
+  if (!state.activeLibrary) return
+  const laps = state.selected.map((entry) => entry.id)
+  const parts = [`lib=${encodeURIComponent(state.activeLibrary.key)}`]
+  if (laps.length) parts.push(`laps=${laps.join(',')}`)
+  const reference = referenceLap()
+  if (reference) parts.push(`ref=${reference.id}`)
+  parts.push(`axis=${state.axis}`, `color=${state.colorMode}`)
+  const hash = `#${parts.join('&')}`
+  if (location.hash !== hash) history.replaceState(null, '', hash)
+}
+
+function readHash() {
+  const raw = location.hash.replace(/^#/, '')
+  if (!raw) return null
+  const params = new URLSearchParams(raw)
+  const lib = params.get('lib')
+  if (!lib) return null
+  return {
+    lib,
+    laps: (params.get('laps') || '').split(',').filter(Boolean),
+    reference: params.get('ref'),
+    axis: params.get('axis'),
+    color: params.get('color')
+  }
+}
+
+async function applyHash(request) {
+  const library = state.libraries.find((item) => item.key === request.lib)
+  if (!library) return false
+  if (request.axis === 'time' || request.axis === 'dist') {
+    state.axis = request.axis
+    for (const node of el('axisMode').children) node.classList.toggle('active', node.dataset.axis === state.axis)
+  }
+  if (request.color) {
+    state.colorMode = request.color
+    el('colorMode').value = request.color
+  }
+  await openLibrary(library, request.laps.length > 0)
+  if (request.laps.length) {
+    state.selected = []
+    state.referenceKey = null
+    for (const id of request.laps) {
+      const lap = state.laps.find((item) => item.id === id)
+      if (lap) await toggleLap(lap)
+    }
+    if (request.reference) {
+      const match = state.selected.find((entry) => entry.id === request.reference)
+      if (match) state.referenceKey = lapKey(match)
+    }
+    render()
+  }
+  return true
+}
+
+/* ------------------------------------------------------------------ boot */
+
+function render() {
+  refreshDeltas()
+  for (const entry of state.selected) {
+    if (entry.cache) delete entry.cache.delta
+  }
+  renderChips()
+  renderLapList()
+  buildCharts()
+  renderSummary()
+  writeHash()
+  scheduleRedraw()
+}
+
+function wire() {
+  state.collapsed = loadTreeState()
+  state.lang = detectLanguage()
+  state.theme = readSetting(THEME_STORAGE, 'auto')
+  applyTheme()
+  applyStaticText()
+
+  el('langMode').addEventListener('click', (event) => {
+    const chip = event.target.closest('.chip')
+    if (chip) setLanguage(chip.dataset.lang)
+  })
+
+  el('themeMode').addEventListener('click', (event) => {
+    const chip = event.target.closest('.chip')
+    if (chip) setTheme(chip.dataset.themeMode)
+  })
+
+  // Following the system theme means reacting when the system changes.
+  window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+    if (state.theme === 'auto') {
+      themeColorCache = null
+      assignLapColors()
+      render()
+    }
+  })
+
+  el('rescan').addEventListener('click', async () => {
+    try {
+      await loadCatalog(true)
+      toast(t('rescanned'))
+    } catch (error) {
+      toast(error.message, true)
+    }
+  })
+
+  el('search').addEventListener('input', (event) => {
+    state.filters.search = event.target.value.trim()
+    renderTree()
+  })
+
+  el('categoryFilter').addEventListener('click', (event) => {
+    const chip = event.target.closest('.chip')
+    if (!chip) return
+    state.filters.category = chip.dataset.category
+    for (const node of el('categoryFilter').children) node.classList.toggle('active', node === chip)
+    renderLapList()
+  })
+
+  el('axisMode').addEventListener('click', (event) => {
+    const chip = event.target.closest('.chip')
+    if (!chip) return
+    state.axis = chip.dataset.axis
+    for (const node of el('axisMode').children) node.classList.toggle('active', node === chip)
+    state.cursorX = null
+    scheduleRedraw()
+  })
+
+  el('vehicleFilter').addEventListener('change', (event) => {
+    state.filters.vehicle = event.target.value
+    renderLapList()
+  })
+
+  el('sortMode').addEventListener('change', (event) => {
+    state.filters.sort = event.target.value
+    renderLapList()
+  })
+
+  el('colorMode').addEventListener('change', (event) => {
+    state.colorMode = event.target.value
+    scheduleRedraw()
+  })
+
+  attachMapCursor()
+  window.addEventListener('resize', scheduleRedraw)
+}
+
+async function boot() {
+  wire()
+  try {
+    await loadCatalog(false)
+    const request = readHash()
+    if (request && await applyHash(request)) return
+    const first = state.libraries.find((library) => library.lapCount > 0)
+    if (first) await openLibrary(first)
+    else render()
+  } catch (error) {
+    toast(error.message, true)
+  }
+}
+
+boot()

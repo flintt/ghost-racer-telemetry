@@ -33,8 +33,10 @@ import (
 // Node is one centre-line point: x, y, z and the road's width there.
 type Node [4]float64
 
-// Road is one DecalRoad from a level.
+// Road is one road-like object from a level: a DecalRoad, or a MeshRoad, which
+// is what bridges and elevated sections are built from.
 type Road struct {
+	Class       string     `json:"class"`
 	Material    string     `json:"material"`
 	Group       string     `json:"group"`
 	Drivability float64    `json:"drivability"`
@@ -247,14 +249,14 @@ func readItems(file itemsFile, into *Level) error {
 			continue
 		}
 		// Cheap reject before spending a JSON parse on 2 000 other objects.
-		if !strings.Contains(line, `"DecalRoad"`) {
+		if !strings.Contains(line, `"DecalRoad"`) && !strings.Contains(line, `"MeshRoad"`) {
 			continue
 		}
 		var parsed item
 		if err := json.Unmarshal([]byte(line), &parsed); err != nil {
 			continue
 		}
-		if parsed.Class != "DecalRoad" || len(parsed.Nodes) == 0 {
+		if (parsed.Class != "DecalRoad" && parsed.Class != "MeshRoad") || len(parsed.Nodes) == 0 {
 			continue
 		}
 		road := buildRoad(&parsed)
@@ -280,6 +282,7 @@ func buildRoad(parsed *item) *Road {
 		return nil
 	}
 	road := &Road{
+		Class:       parsed.Class,
 		Material:    parsed.Material,
 		Group:       parsed.Parent,
 		Drivability: parsed.Drivability,
@@ -289,6 +292,8 @@ func buildRoad(parsed *item) *Road {
 		Bounds:    [4]float64{math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)},
 	}
 	for _, node := range raw {
+		// A MeshRoad node carries a depth after its width; the first four
+		// numbers mean the same thing in both classes.
 		if len(node) < 4 {
 			continue
 		}
@@ -334,6 +339,7 @@ func DefaultFilter() Filter {
 // Materials counts what a level is actually made of, so a filter can be chosen
 // from evidence instead of guesswork.
 type MaterialStat struct {
+	Class          string  `json:"class"`
 	Material       string  `json:"material"`
 	Group          string  `json:"group"`
 	Roads          int     `json:"roads"`
@@ -350,10 +356,11 @@ func (level *Level) Materials() []MaterialStat {
 	}
 	buckets := map[string]*bucket{}
 	for _, road := range level.Roads {
-		key := road.Material + "\x00" + road.Group
+		key := road.Class + "\x00" + road.Material + "\x00" + road.Group
 		entry := buckets[key]
 		if entry == nil {
-			entry = &bucket{stat: MaterialStat{Material: road.Material, Group: road.Group}}
+			entry = &bucket{stat: MaterialStat{
+				Class: road.Class, Material: road.Material, Group: road.Group}}
 			buckets[key] = entry
 		}
 		entry.stat.Roads++
@@ -388,7 +395,11 @@ func (level *Level) Clip(minX, minY, maxX, maxY float64, filter Filter) []*Road 
 		if filter.VisibleOnly && road.Invisible {
 			continue
 		}
-		if road.Drivability < filter.MinDrivability {
+		// A MeshRoad is structure, not paint: bridges and elevated sections are
+		// built from it and often carry no drivability of their own, yet the
+		// road plainly runs over them. Dropping them breaks the surface exactly
+		// where a bridge is.
+		if road.Class != "MeshRoad" && road.Drivability < filter.MinDrivability {
 			continue
 		}
 		if road.Bounds[0] > maxX || road.Bounds[2] < minX ||

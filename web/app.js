@@ -1613,41 +1613,90 @@ async function ensureRoads() {
   scheduleRedraw()
 }
 
-// paintRoads fills each road between its edges, which are the centre line offset
-// by half the width recorded at every node.
+// paintRoads draws the road network as ONE surface.
+//
+// Filling and outlining each road separately is what makes it look like loose
+// tiles: every joint gets an end cap drawn across it, and translucent fills
+// double up where two roads overlap. Instead every road's outline — a strip of
+// its own varying width, with a rounded cap at each end — is accumulated into a
+// single path and filled once, so junctions merge the way they do on a map. The
+// casing is the same shape inset by a hair and filled on top, which outlines the
+// network as a whole instead of each piece of it.
 function paintRoads(context, projection) {
   if (!state.showRoads || !state.roads || !state.roads.roads.length) return
-  const fill = themeColor('--road-fill')
-  const edge = themeColor('--road-edge')
+  if (typeof Path2D !== 'function') return
 
+  // A casing about a pixel and a half wide, expressed in metres so it survives
+  // the projection.
+  const casing = Math.max(0.25, 1.6 / (projection.scale || 1))
+  const outer = new Path2D()
+  const inner = new Path2D()
   for (const road of state.roads.roads) {
-    const nodes = road.nodes
-    if (!nodes || nodes.length < 2) continue
-    const left = []
-    const right = []
-    for (let i = 0; i < nodes.length; i += 1) {
-      const previous = nodes[Math.max(0, i - 1)]
-      const next = nodes[Math.min(nodes.length - 1, i + 1)]
-      const dx = next[0] - previous[0]
-      const dy = next[1] - previous[1]
-      const length = Math.hypot(dx, dy) || 1
-      const half = nodes[i][3] / 2
-      const nx = (-dy / length) * half
-      const ny = (dx / length) * half
-      left.push(projection.project(nodes[i][0] + nx, nodes[i][1] + ny, nodes[i][2]))
-      right.push(projection.project(nodes[i][0] - nx, nodes[i][1] - ny, nodes[i][2]))
-    }
+    addRoadOutline(outer, road, projection, 0)
+    addRoadOutline(inner, road, projection, casing)
+  }
 
-    context.beginPath()
-    context.moveTo(left[0][0], left[0][1])
-    for (let i = 1; i < left.length; i += 1) context.lineTo(left[i][0], left[i][1])
-    for (let i = right.length - 1; i >= 0; i -= 1) context.lineTo(right[i][0], right[i][1])
-    context.closePath()
-    context.fillStyle = fill
-    context.fill()
-    context.strokeStyle = edge
-    context.lineWidth = 1
-    context.stroke()
+  context.fillStyle = themeColor('--road-edge')
+  context.fill(outer)
+  context.fillStyle = themeColor('--road-fill')
+  context.fill(inner)
+}
+
+// addRoadOutline appends one road as a closed strip: the left edge out, a round
+// cap, the right edge back, another cap. `inset` narrows it, which is how the
+// casing and the surface come from the same geometry.
+function addRoadOutline(path, road, projection, inset) {
+  const nodes = road.nodes
+  if (!nodes || nodes.length < 2) return
+
+  const half = (i) => Math.max(0.15, nodes[i][3] / 2 - inset)
+  const normal = (i) => {
+    const previous = nodes[Math.max(0, i - 1)]
+    const next = nodes[Math.min(nodes.length - 1, i + 1)]
+    const dx = next[0] - previous[0]
+    const dy = next[1] - previous[1]
+    const length = Math.hypot(dx, dy) || 1
+    return [-dy / length, dx / length]
+  }
+
+  const side = (i, sign) => {
+    const [nx, ny] = normal(i)
+    const reach = half(i) * sign
+    return projection.project(nodes[i][0] + nx * reach, nodes[i][1] + ny * reach, nodes[i][2])
+  }
+
+  let started = false
+  const step = (point) => {
+    if (started) path.lineTo(point[0], point[1])
+    else { path.moveTo(point[0], point[1]); started = true }
+  }
+
+  for (let i = 0; i < nodes.length; i += 1) step(side(i, 1))
+  addCap(path, road, projection, nodes.length - 1, inset, 1)
+  for (let i = nodes.length - 1; i >= 0; i -= 1) step(side(i, -1))
+  addCap(path, road, projection, 0, inset, -1)
+  path.closePath()
+}
+
+// addCap walks a half circle around an end node in WORLD space, so it stays a
+// cap under the tilted projection too. Caps are what let two roads meeting at a
+// junction merge into one shape rather than butt against each other.
+function addCap(path, road, projection, index, inset, direction) {
+  const nodes = road.nodes
+  const reach = Math.max(0.15, nodes[index][3] / 2 - inset)
+  const neighbour = index === 0 ? nodes[1] : nodes[index - 1]
+  const dx = nodes[index][0] - neighbour[0]
+  const dy = nodes[index][1] - neighbour[1]
+  const heading = Math.atan2(dy, dx) * direction
+  const steps = 6
+  for (let k = 1; k < steps; k += 1) {
+    const angle = heading + (Math.PI / 2) * direction - (Math.PI * k) / steps * direction
+    const point = projection.project(
+      nodes[index][0] + Math.cos(angle) * reach,
+      nodes[index][1] + Math.sin(angle) * reach,
+      nodes[index][2]
+    )
+    path.lineTo(point[0], point[1])
   }
 }
 
@@ -1991,7 +2040,7 @@ function drawMap() {
   const { context, width, height, ratio } = fitCanvas(canvas)
   context.clearRect(0, 0, width, height)
   if (!entries.length) {
-    el('mapLegend').textContent = ''
+    clearLegend()
     state.mapProjected = null
     return
   }
@@ -2392,6 +2441,16 @@ function drawMapCursor(context) {
       context.stroke()
     }
   }
+}
+
+// clearLegend empties the legend AND forgets its cache key. Leaving the key set
+// while the element is empty makes the next identical legend a no-op — which is
+// what hid it after switching start line, until a reload changed the key.
+function clearLegend() {
+  const legend = el('mapLegend')
+  legend.textContent = ''
+  legend.hidden = true
+  delete legend.dataset.signature
 }
 
 function renderLegend(scales) {

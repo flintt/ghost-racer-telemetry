@@ -51,8 +51,12 @@ const invisibleRoad = `{"class":"DecalRoad","persistentId":"b","__parent":"ai_ro
 const faraway = `{"class":"DecalRoad","persistentId":"c","__parent":"ai_roads","material":"road_asphalt_2lane","drivability":1,"nodes":[[9000,9000,0,6],[9100,9000,0,6]]}`
 const notARoad = `{"class":"TSStatic","shapeName":"tree.dae","position":[1,2,3]}`
 
+// A bridge: MeshRoad, nodes carrying width then depth, and no drivability of
+// its own.
+const bridge = `{"class":"MeshRoad","persistentId":"d","__parent":"bridges","material":"bridge_concrete","nodes":[[200,50,12,10,1.5],[260,60,12,10,1.5]]}`
+
 func TestExtractReadsRoadsAndWidths(t *testing.T) {
-	root := writeArchive(t, visibleRoad, invisibleRoad, faraway, notARoad)
+	root := writeArchive(t, visibleRoad, invisibleRoad, faraway, notARoad, bridge)
 	// The archive is named East_Coast_USA.zip while the level id is lowercase.
 	source, err := Locate(root, "", "east_coast_usa")
 	if err != nil {
@@ -63,11 +67,11 @@ func TestExtractReadsRoadsAndWidths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(level.Roads) != 3 {
-		t.Fatalf("extracted %d roads, want 3", len(level.Roads))
+	if len(level.Roads) != 4 {
+		t.Fatalf("extracted %d roads, want 3 decals and the bridge", len(level.Roads))
 	}
-	if level.NodeCount != 7 {
-		t.Errorf("node count = %d, want 7", level.NodeCount)
+	if level.NodeCount != 9 {
+		t.Errorf("node count = %d, want 9", level.NodeCount)
 	}
 	first := level.Roads[0]
 	if first.Material != "road_asphalt_2lane" || first.Invisible {
@@ -86,7 +90,7 @@ func TestExtractReadsRoadsAndWidths(t *testing.T) {
 }
 
 func TestClipDropsDistantAndInvisibleRoads(t *testing.T) {
-	root := writeArchive(t, visibleRoad, invisibleRoad, faraway, notARoad)
+	root := writeArchive(t, visibleRoad, invisibleRoad, faraway, notARoad, bridge)
 	source, _ := Locate(root, "", "east_coast_usa")
 	level, err := Extract(source, "east_coast_usa")
 	if err != nil {
@@ -95,15 +99,36 @@ func TestClipDropsDistantAndInvisibleRoads(t *testing.T) {
 
 	// The drivable AI layer is the road network the game's own minimap draws, so
 	// it is kept; the box is what excludes the distant road.
-	near := level.Clip(-50, -50, 250, 600, DefaultFilter())
-	if len(near) != 2 {
-		t.Fatalf("clip returned %d roads, want the asphalt and the AI layer: %+v", len(near), near)
+	near := level.Clip(-50, -50, 300, 600, DefaultFilter())
+	if len(near) != 3 {
+		t.Fatalf("clip returned %d roads, want the asphalt, the AI layer and the bridge: %+v",
+			len(near), near)
 	}
+	// The bridge has no drivability at all and must survive anyway, or the
+	// surface breaks exactly where the bridge is.
+	bridgeKept := false
+	for _, road := range near {
+		if road.Class == "MeshRoad" {
+			bridgeKept = true
+		}
+	}
+	if !bridgeKept {
+		t.Error("the MeshRoad bridge was filtered out")
+	}
+	// Visible-only drops the invisible AI layer and keeps what is rendered,
+	// which includes the bridge.
 	visibleOnly := DefaultFilter()
 	visibleOnly.VisibleOnly = true
-	painted := level.Clip(-50, -50, 250, 600, visibleOnly)
-	if len(painted) != 1 || painted[0].Material != "road_asphalt_2lane" {
-		t.Errorf("visible-only should leave the rendered road alone: %+v", painted)
+	painted := level.Clip(-50, -50, 300, 600, visibleOnly)
+	materials := map[string]bool{}
+	for _, road := range painted {
+		materials[road.Material] = true
+	}
+	if len(painted) != 2 || !materials["road_asphalt_2lane"] || !materials["bridge_concrete"] {
+		t.Errorf("visible-only kept %d roads: %v", len(painted), materials)
+	}
+	if materials["road_invisible"] {
+		t.Error("visible-only must drop the invisible AI layer")
 	}
 }
 

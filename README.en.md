@@ -60,7 +60,7 @@ To point it somewhere else:
 
 `RD` in the map's corner draws **the actual roads from the game's level files** underneath the racing line — surface and edges — so where the car sat on the road, and whether it went over a kerb, is visible rather than inferred.
 
-Roads are read straight out of the installed level archive: `content/levels/<level>.zip`, and inside it the newline-delimited objects of `levels/<level>/main/MissionGroup/**/items.level.json`, keeping the `DecalRoad` ones:
+Roads are read straight out of the installed level archive: `content/levels/<level>.zip`, and inside it the newline-delimited objects of `levels/<level>/main/MissionGroup/**/items.level.json`, keeping the `DecalRoad` and `MeshRoad` ones:
 
 ```jsonc
 {"class":"DecalRoad","material":"road_asphalt_2lane","drivability":1,
@@ -71,6 +71,7 @@ Roads are read straight out of the installed level archive: `content/levels/<lev
 
 - The install is found through Steam's `libraryfolders.vdf`, so a second drive works; `-game` overrides it.
 - **Filtering is on `drivability`, not on material.** DecalRoad is not a road class: pavements, parking bays, kerbs, cracks and the concrete skirt around a building are all DecalRoads, and keeping them draws a floor plan of the town instead of a track. Drivability is the game's own criterion — BeamNG's map-making guide has authors **duplicate a road, set its material to `road_invisible` and its drivability to 1** so that it shows up on the in-game minimap, which means **the minimap draws exactly that deliberately-invisible drivable layer**. An invisible material is therefore a sign of a real road, and the painted decals are the things to leave out.
+- **Bridges and elevated sections are read too**: those are `MeshRoad`, whose nodes carry a depth after the width (the first four numbers mean the same thing), and which frequently carry no drivability of their own — filtering on drivability would break the surface exactly where a bridge is, so MeshRoads skip that test.
 - `?visible=1` inverts it to rendered materials only, `?mindriv=` moves the threshold, and `?stats=1` lists a level's materials (road count, nodes, how many are drivable, median width) for checking the rule against a real level.
 - Only roads within the lap's bounding box (plus 300 m) are returned.
 - Extractions are cached in `<data>/roads/<level>.json`, keyed on the archive's size and timestamp, so a game update re-reads and an uninstalled game still shows its roads.

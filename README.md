@@ -60,7 +60,7 @@ go build -o ghost-racer-telemetry .   # Windows: GOOS=windows GOARCH=amd64 go bu
 
 点轨迹图右上角的 `RD`，会把**游戏关卡里真实的道路**画在轨迹下面——灰色路面加边界线，一眼看出车在路上的位置、压没压线。
 
-道路直接从游戏安装目录的关卡存档里读：`content/levels/<level>.zip` 内的 `levels/<level>/main/MissionGroup/**/items.level.json`，按行的 JSON 对象，取其中的 `DecalRoad`：
+道路直接从游戏安装目录的关卡存档里读：`content/levels/<level>.zip` 内的 `levels/<level>/main/MissionGroup/**/items.level.json`，按行的 JSON 对象，取其中的 `DecalRoad` 和 `MeshRoad`：
 
 ```jsonc
 {"class":"DecalRoad","material":"road_asphalt_2lane","drivability":1,
@@ -71,6 +71,7 @@ go build -o ghost-racer-telemetry .   # Windows: GOOS=windows GOARCH=amd64 go bu
 
 - 安装目录自动探测：读 Steam 的 `libraryfolders.vdf`，所以装在别的盘也能找到；也可以用 `-game` 手动指定
 - **按 `drivability` 过滤，不按材质**。`DecalRoad` 不是"路"这个类——人行道、停车位标线、路缘、地面裂纹、建筑周围的水泥裙边全是 DecalRoad，全画出来是一张镇子的平面图而不是赛道。游戏自己的判据是 drivability：BeamNG 的地图制作指南让作者**复制一条路、把材质改成 `road_invisible`、drivability 设成 1**，路才会出现在游戏内 minimap 上——也就是说 **minimap 画的就是这层"故意隐形但可驾驶"的 AI 路网**。所以隐形材质是"这是真路"的标志，反而要保留；该丢的是那些画上去的装饰贴花。
+- **桥和高架也读**：那些是 `MeshRoad`（节点比 DecalRoad 多一个深度值，前四个数含义相同），而且往往自身没有 drivability——按 drivability 过滤会恰好在桥这里把路面切断，所以 MeshRoad 不走 drivability 判据
 - `?visible=1` 可以反过来只要可见材质，`?mindriv=` 可以调阈值；`?stats=1` 会列出该关卡的材质分布（条数、节点数、可驾驶数、中位宽度），用来核对过滤规则
 - 只取圈的包围盒附近的路（外扩 300 米），不会把整张地图的路都塞过来
 - 解析结果缓存在 `<data>/roads/<level>.json`，按存档大小和修改时间校验，游戏更新会自动重新解析；游戏卸载后缓存仍然可用

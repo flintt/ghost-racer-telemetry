@@ -123,7 +123,7 @@ Measured on synthesised drift and spin data, sampled every other point:
 
 Through a drift the map barely moves; taken from the car's facing it would shake back and forth eighteen times. Over a normal lap the largest step is 0.92° per 2 m.
 
-**A zoomed map follows the cursor.** Moving the cursor on the charts — or hovering a row in the sector table — pans the map when the matching point approaches the edge, by the least amount that brings it back inside, so scrubbing looks like the map sliding along with the point. Only a jump of more than a screen (landing on a different sector, say) recentres outright. Over a 1200-step sweep of a whole lap at 23× zoom the point never left the viewport once. Dragging the map yourself, or hovering directly on it, never triggers the follow.
+**A zoomed map follows the cursor.** Moving the cursor on the charts — or hovering a row in the sector table — pans the map to hold the matching point **in the middle**. This first nudged by the least amount that brought the point back inside a safe box, meaning to stop the map crawling under the reader; zoomed in that reads as broken, because after the first correction the point rides the edge of the box and never returns to the centre. The cursor moves smoothly, so centring on it is smooth too. Over a sweep of a whole lap at 23× zoom the offset from centre stays at 0 px, and after dragging the map away one cursor move brings it straight back. Hovering directly on the map, or dragging it, never triggers the follow.
 
 Switching between the distance and time axis clears the window, since a range in metres does not carry over to seconds. While zoomed, the map culls segments outside the viewport, so drawing gets cheaper the further you zoom in.
 

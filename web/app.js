@@ -1653,84 +1653,65 @@ function fillNetwork(context, projection, grow, colour) {
   context.fill(path)
 }
 
-// roadJoins finds pairs of road ends that almost meet and returns the little
-// segments that close them.
+// roadJoins finds pairs of road ends that belong together and returns the little
+// segments that close the gap between them.
 //
-// Roads are separate objects and their ends do not have to touch: a bridge deck
-// is its own object, and the road either side of it stops short. Height is part
-// of the test, so an overpass never gets welded to the road running underneath.
+// Roads are separate objects and their ends do not have to touch. A short gap is
+// closed on proximity alone. A longer one is closed only when the two roads
+// point at each other — a bridge deck is its own object and the network either
+// side of it can stop tens of metres short, but it stops in line with itself,
+// which a crossing road never does. Height is part of both tests, so an overpass
+// is never welded to the road running underneath it.
 function roadJoins() {
   if (state.roadJoinsKey === state.roads.key) return state.roadJoinsCache
+
   const ends = []
   for (const road of state.roads.roads) {
     const nodes = road.nodes
     if (!nodes || nodes.length < 2) continue
-    ends.push(nodes[0], nodes[nodes.length - 1])
+    ends.push({ node: nodes[0], outward: direction(nodes[1], nodes[0]) })
+    ends.push({
+      node: nodes[nodes.length - 1],
+      outward: direction(nodes[nodes.length - 2], nodes[nodes.length - 1])
+    })
   }
 
   const joins = []
-  const used = new Set()
   for (let i = 0; i < ends.length; i += 1) {
     for (let j = i + 1; j < ends.length; j += 1) {
       const a = ends[i]
       const b = ends[j]
-      const gap = Math.hypot(a[0] - b[0], a[1] - b[1])
-      if (gap === 0 || gap > Math.min(12, (a[3] + b[3]) / 2 + 4)) continue
-      if (Math.abs(a[2] - b[2]) > 2.5) continue
-      const key = `${i}:${j}`
-      if (used.has(key)) continue
-      used.add(key)
-      joins.push([a, b])
+      const dx = b.node[0] - a.node[0]
+      const dy = b.node[1] - a.node[1]
+      const gap = Math.hypot(dx, dy)
+      if (gap === 0 || gap > 60) continue
+      // A ramp climbs; allow a little height per metre of gap, never a storey.
+      if (Math.abs(a.node[2] - b.node[2]) > 2.5 + gap * 0.15) continue
+
+      const short = gap <= Math.min(14, (a.node[3] + b.node[3]) / 2 + 4)
+      if (!short) {
+        const towards = [dx / gap, dy / gap]
+        const aligned = dot(a.outward, towards) > 0.9 && dot(b.outward, towards) < -0.9
+        if (!aligned) continue
+      }
+      joins.push([a.node, b.node])
     }
   }
+
   state.roadJoinsKey = state.roads.key
   state.roadJoinsCache = joins
   return joins
 }
 
-// addSegment lays a trapezoid between two nodes, honouring each one's width.
-function addSegment(path, from, to, projection, grow) {
+function direction(from, to) {
   const dx = to[0] - from[0]
   const dy = to[1] - from[1]
-  const length = Math.hypot(dx, dy)
-  if (length === 0) return
-  const nx = -dy / length
-  const ny = dx / length
-  const fromHalf = Math.max(0.15, from[3] / 2 + grow / 2)
-  const toHalf = Math.max(0.15, to[3] / 2 + grow / 2)
-
-  const corners = [
-    projection.project(from[0] + nx * fromHalf, from[1] + ny * fromHalf, from[2]),
-    projection.project(to[0] + nx * toHalf, to[1] + ny * toHalf, to[2]),
-    projection.project(to[0] - nx * toHalf, to[1] - ny * toHalf, to[2]),
-    projection.project(from[0] - nx * fromHalf, from[1] - ny * fromHalf, from[2])
-  ]
-  path.moveTo(corners[0][0], corners[0][1])
-  for (let i = 1; i < corners.length; i += 1) path.lineTo(corners[i][0], corners[i][1])
-  path.closePath()
+  const length = Math.hypot(dx, dy) || 1
+  return [dx / length, dy / length]
 }
 
-// addDisc walks a ring around one node in WORLD space, so it stays a disc under
-// the tilted projection as well.
-//
-// The ring is wound the SAME way round as the trapezoids. Nonzero filling
-// cancels where two sub-paths of opposite winding overlap, and a ring wound the
-// other way punches a hole out of the segment it was meant to weld — which
-// shows up as a row of notches down the middle of the road.
-function addDisc(path, node, projection, grow) {
-  const radius = Math.max(0.15, node[3] / 2 + grow / 2)
-  const steps = 8
-  for (let k = 0; k < steps; k += 1) {
-    const angle = -(k / steps) * Math.PI * 2
-    const point = projection.project(
-      node[0] + Math.cos(angle) * radius,
-      node[1] + Math.sin(angle) * radius,
-      node[2]
-    )
-    if (k === 0) path.moveTo(point[0], point[1])
-    else path.lineTo(point[0], point[1])
-  }
-  path.closePath()
+function dot(a, b) {
+  return a[0] * b[0] + a[1] * b[1]
 }
 
 /* ------------------------------------------------------------- track map */

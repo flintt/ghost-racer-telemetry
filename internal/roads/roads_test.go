@@ -2,6 +2,7 @@ package roads
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -158,5 +159,39 @@ func TestStoreCachesExtraction(t *testing.T) {
 	}
 	if len(again.Roads) != 1 {
 		t.Errorf("cached level has %d roads", len(again.Roads))
+	}
+}
+
+func TestCacheIsInvalidatedWhenExtractionChanges(t *testing.T) {
+	root := writeArchive(t, visibleRoad, bridge)
+	cache := t.TempDir()
+
+	if _, err := NewStore(cache).Load(root, "", "east_coast_usa"); err != nil {
+		t.Fatal(err)
+	}
+	// Rewrite the cache as an older build would have: valid, current archive
+	// stamps, but produced by a different extractor.
+	path := filepath.Join(cache, "east_coast_usa.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file map[string]any
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatal(err)
+	}
+	file["format"] = cacheFormat - 1
+	file["level"].(map[string]any)["roads"] = []any{}
+	stale, _ := json.Marshal(file)
+	if err := os.WriteFile(path, stale, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	level, err := NewStore(cache).Load(root, "", "east_coast_usa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(level.Roads) != 2 {
+		t.Fatalf("a cache from an older extractor must be re-read, got %d roads", len(level.Roads))
 	}
 }

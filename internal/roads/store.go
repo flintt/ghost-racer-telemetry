@@ -17,7 +17,14 @@ type Store struct {
 	cached map[string]*Level
 }
 
+// cacheFormat is bumped whenever extraction changes what it produces. Without
+// it a cache written by an older build survives — the archive has not changed,
+// after all — and the new parsing never runs. That is how MeshRoad bridges went
+// on missing after support for them was added.
+const cacheFormat = 2
+
 type cacheFile struct {
+	Format      int       `json:"format"`
 	Level       *Level    `json:"level"`
 	ArchiveSize int64     `json:"archiveSize"`
 	ArchiveTime time.Time `json:"archiveTime"`
@@ -30,6 +37,9 @@ func readCache(path string) *cacheFile {
 	}
 	var file cacheFile
 	if json.Unmarshal(data, &file) != nil || file.Level == nil {
+		return nil
+	}
+	if file.Format != cacheFormat {
 		return nil
 	}
 	return &file
@@ -79,6 +89,7 @@ func (s *Store) Load(gameRoot, userRoot, level string) (*Level, error) {
 
 	if err := os.MkdirAll(s.dir, 0o755); err == nil {
 		if data, marshalErr := json.Marshal(cacheFile{
+			Format:      cacheFormat,
 			Level:       extracted,
 			ArchiveSize: size,
 			ArchiveTime: stamp,

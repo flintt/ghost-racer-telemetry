@@ -398,11 +398,21 @@ func (s *server) handleRoads(writer http.ResponseWriter, request *http.Request) 
 	query := request.URL.Query()
 	// A level's material breakdown, for deciding what counts as a road.
 	if query.Get("stats") == "1" {
+		classes := map[string]int{}
+		drivable := 0
+		for _, road := range extracted.Roads {
+			classes[road.Class]++
+			if road.Drivability > 0 {
+				drivable++
+			}
+		}
 		writeJSON(writer, http.StatusOK, map[string]any{
 			"level":     extracted.Level,
 			"source":    extracted.Source,
 			"roads":     len(extracted.Roads),
 			"nodes":     extracted.NodeCount,
+			"drivable":  drivable,
+			"classes":   classes,
 			"materials": extracted.Materials(),
 		})
 		return

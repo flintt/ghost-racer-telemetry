@@ -26,6 +26,9 @@ const state = {
   axis: 'dist',
   colorMode: 'speed',
   cursorX: null,
+  // A pinned cursor survives the mouse wandering off to the other pane; hover
+  // cannot move or clear it, only another click or Esc can.
+  cursorPinned: false,
   hoverLapKey: null,
   charts: [],
   collapsed: new Map(),
@@ -78,6 +81,8 @@ const I18N = {
     tabMetrics: '汇总', tabSectors: '分段',
     resetZoom: '1:1', resetRange: '全程 ·',
     collapse: '折叠', expand: '展开',
+    pinned: '已锁定', pinRelease: '释放（Esc）', pinCentre: '把地图移到锁定点',
+    pinHint: '点击锁定游标 · 锁定后移到另一侧不会丢位置',
     zoomHint: '滚轮缩放 · 拖动平移 · 双击还原',
     idealLap: (ideal, gap, coverage) =>
       `理论最佳 ${ideal} · 比最快圈快 ${gap} · 覆盖 ${coverage} m`,
@@ -105,7 +110,7 @@ const I18N = {
     legendGearLow: '低档', legendGearHigh: '高档',
     legendDeltaGain: '追回时间', legendDeltaLoss: '丢失时间',
     legendBrake: '刹车', legendThrottle: '全油门',
-    readoutHint: '把鼠标移到轨迹或曲线上查看该点数据',
+    readoutHint: '把鼠标移到轨迹或曲线上查看该点数据；点击可锁定位置',
     readoutSummary: (count, reference) => `${count} 条记录 · 参照圈 ${reference}`,
     readoutPosition: '位置', readoutTime: '时间', readoutEnded: '已结束',
     readoutThrottle: '油', readoutBrake: '刹', readoutGear: 'G'
@@ -143,6 +148,8 @@ const I18N = {
     tabMetrics: 'Summary', tabSectors: 'Sectors',
     resetZoom: '1:1', resetRange: 'Full ·',
     collapse: 'Collapse', expand: 'Expand',
+    pinned: 'Pinned', pinRelease: 'Release (Esc)', pinCentre: 'Bring the map to the pinned point',
+    pinHint: 'Click to pin the cursor · a pinned position survives moving to the other pane',
     zoomHint: 'Wheel to zoom · drag to pan · double-click to reset',
     idealLap: (ideal, gap, coverage) =>
       `Ideal lap ${ideal} · ${gap} under the quickest · over ${coverage} m`,
@@ -170,7 +177,7 @@ const I18N = {
     legendGearLow: 'low gear', legendGearHigh: 'high gear',
     legendDeltaGain: 'gaining', legendDeltaLoss: 'losing',
     legendBrake: 'brake', legendThrottle: 'full throttle',
-    readoutHint: 'Hover the map or a chart to read that point',
+    readoutHint: 'Hover the map or a chart to read that point; click to pin it',
     readoutSummary: (count, reference) => `${count} recordings · reference ${reference}`,
     readoutPosition: 'At', readoutTime: 'Time', readoutEnded: 'ended',
     readoutThrottle: 'thr', readoutBrake: 'brk', readoutGear: 'G'
@@ -220,7 +227,7 @@ function applyStaticText() {
   for (const node of document.querySelectorAll('[data-i18n-placeholder]')) {
     node.placeholder = t(node.dataset.i18nPlaceholder)
   }
-  el('map').title = t('zoomHint')
+  el('map').title = `${t('zoomHint')}\n${t('pinHint')}`
   updateZoomControls()
   applyPanels()
   fillSelect(el('sortMode'), [
@@ -311,7 +318,7 @@ function themeColor(name) {
     themeColorCache = {}
     const styles = getComputedStyle(document.documentElement)
     for (const key of ['--chart-grid', '--chart-text', '--chart-zero', '--chart-cursor',
-      '--chart-dot-ring', '--chart-reference-dim', '--trace-muted']) {
+      '--chart-cursor-pinned', '--chart-dot-ring', '--chart-reference-dim', '--trace-muted']) {
       themeColorCache[key] = styles.getPropertyValue(key).trim()
     }
   }
@@ -1282,15 +1289,20 @@ function renderSectorTable(container) {
     // Hovering a row parks the cursor in that stretch on every chart and the
     // map. Stretches are measured in metres, so on the time axis the middle of
     // the stretch has to be turned into the reference lap's time there.
-    row.addEventListener('mouseenter', () => {
+    const stretchValue = () => {
       const middle = (run.from + run.to) / 2
-      if (state.axis === 'dist') {
-        setCursor(middle, 'table')
-        return
-      }
+      if (state.axis === 'dist') return middle
       const anchor = reference && reference.stations ? reference : run.entry
-      if (!anchor || !anchor.stations) return
-      setCursor(interpolate(anchor.stations, anchor.lap.channels.t, middle), 'table')
+      if (!anchor || !anchor.stations) return null
+      return interpolate(anchor.stations, anchor.lap.channels.t, middle)
+    }
+    row.addEventListener('mouseenter', () => {
+      const value = stretchValue()
+      if (value != null) setCursor(value, { source: 'table' })
+    })
+    row.addEventListener('click', () => {
+      const value = stretchValue()
+      if (value != null) setCursor(value, { source: 'table', pin: true })
     })
   }
   container.append(table)
@@ -1836,6 +1848,14 @@ function drawMapCursor(context) {
     context.lineWidth = 1.5
     context.strokeStyle = themeColor('--chart-dot-ring')
     context.stroke()
+    if (state.cursorPinned) {
+      // A halo makes the parked point findable after panning around.
+      context.beginPath()
+      context.arc(points[index * 2], points[index * 2 + 1], 8.5, 0, Math.PI * 2)
+      context.strokeStyle = themeColor('--chart-cursor-pinned')
+      context.lineWidth = 1.5
+      context.stroke()
+    }
   }
 }
 
@@ -2177,8 +2197,10 @@ function drawChartCursor(context, chart) {
   if (state.cursorX < from || state.cursorX > from + span) return
 
   const x = Math.round(xAt(state.cursorX)) + 0.5
-  context.strokeStyle = themeColor('--chart-cursor')
-  context.lineWidth = 1
+  context.strokeStyle = state.cursorPinned
+    ? themeColor('--chart-cursor-pinned')
+    : themeColor('--chart-cursor')
+  context.lineWidth = state.cursorPinned ? 1.5 : 1
   context.beginPath()
   context.moveTo(x, top)
   context.lineTo(x, top + plotHeight)
@@ -2209,17 +2231,32 @@ function formatAxisValue(value) {
 
 /* ---------------------------------------------------------------- cursor */
 
+function chartValueAt(canvas, clientX) {
+  const chart = state.charts.find((item) => item.canvas === canvas)
+  if (!chart || !chart.geometry) return null
+  const rect = canvas.getBoundingClientRect()
+  const { left, plotWidth, from, span } = chart.geometry
+  const ratio = (clientX - rect.left - left) / plotWidth
+  return Math.max(from, Math.min(from + span, from + ratio * span))
+}
+
 function attachCursor(canvas) {
   canvas.addEventListener('mousemove', (event) => {
     if (state.chartDrag) return
-    const chart = state.charts.find((item) => item.canvas === canvas)
-    if (!chart || !chart.geometry) return
-    const rect = canvas.getBoundingClientRect()
-    const { left, plotWidth, from, span } = chart.geometry
-    const ratio = (event.clientX - rect.left - left) / plotWidth
-    setCursor(Math.max(from, Math.min(from + span, from + ratio * span)), 'chart')
+    const value = chartValueAt(canvas, event.clientX)
+    if (value != null) setCursor(value, { source: 'chart' })
   })
-  canvas.addEventListener('mouseleave', () => setCursor(null, 'chart'))
+  canvas.addEventListener('mouseleave', () => {
+    if (!state.cursorPinned) setCursor(null, { source: 'chart' })
+  })
+  canvas.addEventListener('click', (event) => {
+    // A click that ended a pan is not a click.
+    if (state.dragMoved) return
+    const value = chartValueAt(canvas, event.clientX)
+    if (value == null) return
+    setCursor(state.cursorPinned && Math.abs(value - state.cursorX) < 1e-9 ? null : value,
+      { source: 'chart', pin: true })
+  })
 }
 
 function attachMapCursor() {
@@ -2254,9 +2291,16 @@ function attachMapCursor() {
     }
     if (!best || best.distance > 40 ** 2) return
     state.hoverLapKey = lapKey(best.entry)
-    setCursor(axisValues(best.entry.lap)[best.index], 'map')
+    state.mapHoverValue = axisValues(best.entry.lap)[best.index]
+    setCursor(state.mapHoverValue, { source: 'map' })
   })
-  canvas.addEventListener('mouseleave', () => setCursor(null, 'map'))
+  canvas.addEventListener('mouseleave', () => {
+    if (!state.cursorPinned) setCursor(null, { source: 'map' })
+  })
+  canvas.addEventListener('click', () => {
+    if (state.dragMoved || state.mapHoverValue == null) return
+    setCursor(state.mapHoverValue, { source: 'map', pin: true })
+  })
 }
 
 /* ------------------------------------------------------------------ zoom */
@@ -2294,6 +2338,7 @@ function attachMapZoom() {
   }, { passive: false })
 
   canvas.addEventListener('mousedown', (event) => {
+    state.dragMoved = false
     if (event.button !== 0 || state.mapView.scale <= 1.001) return
     event.preventDefault()
     state.mapDrag = {
@@ -2328,6 +2373,7 @@ function attachChartZoom(canvas) {
   }, { passive: false })
 
   canvas.addEventListener('mousedown', (event) => {
+    state.dragMoved = false
     if (event.button !== 0 || !isZoomed()) return
     const chart = state.charts.find((item) => item.canvas === canvas)
     if (!chart || !chart.geometry) return
@@ -2346,6 +2392,12 @@ function attachChartZoom(canvas) {
 // on a canvas must keep working after the pointer leaves it.
 function attachDragging() {
   document.addEventListener('mousemove', (event) => {
+    if (state.mapDrag || state.chartDrag) {
+      const drag = state.mapDrag || state.chartDrag
+      if (Math.abs(event.clientX - drag.x) > 3 || Math.abs(event.clientY - (drag.y ?? event.clientY)) > 3) {
+        state.dragMoved = true
+      }
+    }
     if (state.mapDrag) {
       state.mapView.panX = state.mapDrag.panX + (event.clientX - state.mapDrag.x)
       state.mapView.panY = state.mapDrag.panY + (event.clientY - state.mapDrag.y)
@@ -2369,13 +2421,41 @@ function attachDragging() {
   })
 }
 
-// setCursor moves the shared cursor. `source` says where the move came from:
-// a cursor driven from the charts or the sector table has to drag the zoomed
-// map along with it, or the point it refers to sits off screen.
-function setCursor(value, source) {
-  if (state.cursorX === value) return
+// setCursor moves the shared cursor.
+//
+// `source` says which pane drove it, so a cursor moved from the charts or the
+// sector table can drag the zoomed map along with it. `pin` marks the move as
+// deliberate: hovering is transient and is ignored while a pin is held, which
+// is what lets the reader park a position on one pane and go work on the other.
+function setCursor(value, options = {}) {
+  const { source, pin } = options
+  if (state.cursorPinned && !pin) return
+  if (pin) state.cursorPinned = value != null
+  if (state.cursorX === value) {
+    if (pin) scheduleRedraw()
+    return
+  }
   state.cursorX = value
   if (source !== 'map') followCursorOnMap()
+  scheduleRedraw()
+}
+
+function releaseCursor() {
+  if (!state.cursorPinned) return
+  state.cursorPinned = false
+  state.cursorX = null
+  scheduleRedraw()
+}
+
+// centreOnCursor brings a pinned point back into a zoomed map, for when the
+// reader has panned away from it.
+function centreOnCursor() {
+  const projection = state.mapProjection
+  if (!projection || state.cursorX == null || state.mapView.scale <= 1.001) return
+  const anchor = cursorAnchor()
+  if (!anchor) return
+  state.mapView.panX += projection.width / 2 - anchor.x
+  state.mapView.panY += projection.height / 2 - anchor.y
   scheduleRedraw()
 }
 
@@ -2463,6 +2543,21 @@ function renderReadout() {
   }
 
   readout.textContent = ''
+  if (state.cursorPinned) {
+    const badge = document.createElement('span')
+    badge.className = 'pin-badge'
+    badge.title = t('pinCentre')
+    const label = document.createElement('span')
+    label.textContent = `📌 ${t('pinned')}`
+    label.addEventListener('click', centreOnCursor)
+    const release = document.createElement('span')
+    release.className = 'release'
+    release.textContent = '✕'
+    release.title = t('pinRelease')
+    release.addEventListener('click', releaseCursor)
+    badge.append(label, release)
+    readout.append(badge)
+  }
   const head = document.createElement('span')
   head.innerHTML = state.axis === 'dist'
     ? `${t('readoutPosition')} <b>${state.cursorX.toFixed(0)} m</b>`
@@ -2656,6 +2751,10 @@ function wire() {
   el('colorMode').addEventListener('change', (event) => {
     state.colorMode = event.target.value
     scheduleRedraw()
+  })
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') releaseCursor()
   })
 
   attachMapCursor()

@@ -1615,13 +1615,16 @@ async function ensureRoads() {
 
 // paintRoads draws the road network as ONE surface.
 //
-// Filling and outlining each road separately is what makes it look like loose
-// tiles: every joint gets an end cap drawn across it, and translucent fills
-// double up where two roads overlap. Instead every road's outline — a strip of
-// its own varying width, with a rounded cap at each end — is accumulated into a
-// single path and filled once, so junctions merge the way they do on a map. The
-// casing is the same shape inset by a hair and filled on top, which outlines the
-// network as a whole instead of each piece of it.
+// The shape is built the way BeamNG's own navigation app builds it: every
+// segment becomes a trapezoid between its two half widths, and every node gets a
+// disc of its own width on top. The discs are what matter — they fill the wedge
+// on the inside of a bend and they weld two roads together where one ends and
+// the next begins. Capping only the ends of each road, which is the obvious
+// thing to do, leaves a notch at every joint.
+//
+// Everything goes into a single path filled once, so overlapping roads do not
+// stack their translucency, and the casing is the same geometry widened and
+// filled underneath.
 function paintRoads(context, projection) {
   if (!state.showRoads || !state.roads || !state.roads.roads.length) return
   if (typeof Path2D !== 'function') return
@@ -1629,75 +1632,105 @@ function paintRoads(context, projection) {
   // A casing about a pixel and a half wide, expressed in metres so it survives
   // the projection.
   const casing = Math.max(0.25, 1.6 / (projection.scale || 1))
-  const outer = new Path2D()
-  const inner = new Path2D()
-  for (const road of state.roads.roads) {
-    addRoadOutline(outer, road, projection, 0)
-    addRoadOutline(inner, road, projection, casing)
-  }
-
-  context.fillStyle = themeColor('--road-edge')
-  context.fill(outer)
-  context.fillStyle = themeColor('--road-fill')
-  context.fill(inner)
+  fillNetwork(context, projection, casing, themeColor('--road-edge'))
+  fillNetwork(context, projection, 0, themeColor('--road-fill'))
 }
 
-// addRoadOutline appends one road as a closed strip: the left edge out, a round
-// cap, the right edge back, another cap. `inset` narrows it, which is how the
-// casing and the surface come from the same geometry.
-function addRoadOutline(path, road, projection, inset) {
-  const nodes = road.nodes
-  if (!nodes || nodes.length < 2) return
+function fillNetwork(context, projection, grow, colour) {
+  const path = new Path2D()
+  for (const road of state.roads.roads) {
+    const nodes = road.nodes
+    if (!nodes || nodes.length < 2) continue
+    for (let i = 0; i + 1 < nodes.length; i += 1) {
+      addSegment(path, nodes[i], nodes[i + 1], projection, grow)
+    }
+    for (let i = 0; i < nodes.length; i += 1) {
+      addDisc(path, nodes[i], projection, grow)
+    }
+  }
+  for (const [from, to] of roadJoins()) addSegment(path, from, to, projection, grow)
+  context.fillStyle = colour
+  context.fill(path)
+}
 
-  const half = (i) => Math.max(0.15, nodes[i][3] / 2 - inset)
-  const normal = (i) => {
-    const previous = nodes[Math.max(0, i - 1)]
-    const next = nodes[Math.min(nodes.length - 1, i + 1)]
-    const dx = next[0] - previous[0]
-    const dy = next[1] - previous[1]
-    const length = Math.hypot(dx, dy) || 1
-    return [-dy / length, dx / length]
+// roadJoins finds pairs of road ends that almost meet and returns the little
+// segments that close them.
+//
+// Roads are separate objects and their ends do not have to touch: a bridge deck
+// is its own object, and the road either side of it stops short. Height is part
+// of the test, so an overpass never gets welded to the road running underneath.
+function roadJoins() {
+  if (state.roadJoinsKey === state.roads.key) return state.roadJoinsCache
+  const ends = []
+  for (const road of state.roads.roads) {
+    const nodes = road.nodes
+    if (!nodes || nodes.length < 2) continue
+    ends.push(nodes[0], nodes[nodes.length - 1])
   }
 
-  const side = (i, sign) => {
-    const [nx, ny] = normal(i)
-    const reach = half(i) * sign
-    return projection.project(nodes[i][0] + nx * reach, nodes[i][1] + ny * reach, nodes[i][2])
+  const joins = []
+  const used = new Set()
+  for (let i = 0; i < ends.length; i += 1) {
+    for (let j = i + 1; j < ends.length; j += 1) {
+      const a = ends[i]
+      const b = ends[j]
+      const gap = Math.hypot(a[0] - b[0], a[1] - b[1])
+      if (gap === 0 || gap > Math.min(12, (a[3] + b[3]) / 2 + 4)) continue
+      if (Math.abs(a[2] - b[2]) > 2.5) continue
+      const key = `${i}:${j}`
+      if (used.has(key)) continue
+      used.add(key)
+      joins.push([a, b])
+    }
   }
+  state.roadJoinsKey = state.roads.key
+  state.roadJoinsCache = joins
+  return joins
+}
 
-  let started = false
-  const step = (point) => {
-    if (started) path.lineTo(point[0], point[1])
-    else { path.moveTo(point[0], point[1]); started = true }
-  }
+// addSegment lays a trapezoid between two nodes, honouring each one's width.
+function addSegment(path, from, to, projection, grow) {
+  const dx = to[0] - from[0]
+  const dy = to[1] - from[1]
+  const length = Math.hypot(dx, dy)
+  if (length === 0) return
+  const nx = -dy / length
+  const ny = dx / length
+  const fromHalf = Math.max(0.15, from[3] / 2 + grow / 2)
+  const toHalf = Math.max(0.15, to[3] / 2 + grow / 2)
 
-  for (let i = 0; i < nodes.length; i += 1) step(side(i, 1))
-  addCap(path, road, projection, nodes.length - 1, inset, 1)
-  for (let i = nodes.length - 1; i >= 0; i -= 1) step(side(i, -1))
-  addCap(path, road, projection, 0, inset, -1)
+  const corners = [
+    projection.project(from[0] + nx * fromHalf, from[1] + ny * fromHalf, from[2]),
+    projection.project(to[0] + nx * toHalf, to[1] + ny * toHalf, to[2]),
+    projection.project(to[0] - nx * toHalf, to[1] - ny * toHalf, to[2]),
+    projection.project(from[0] - nx * fromHalf, from[1] - ny * fromHalf, from[2])
+  ]
+  path.moveTo(corners[0][0], corners[0][1])
+  for (let i = 1; i < corners.length; i += 1) path.lineTo(corners[i][0], corners[i][1])
   path.closePath()
 }
 
-// addCap walks a half circle around an end node in WORLD space, so it stays a
-// cap under the tilted projection too. Caps are what let two roads meeting at a
-// junction merge into one shape rather than butt against each other.
-function addCap(path, road, projection, index, inset, direction) {
-  const nodes = road.nodes
-  const reach = Math.max(0.15, nodes[index][3] / 2 - inset)
-  const neighbour = index === 0 ? nodes[1] : nodes[index - 1]
-  const dx = nodes[index][0] - neighbour[0]
-  const dy = nodes[index][1] - neighbour[1]
-  const heading = Math.atan2(dy, dx) * direction
-  const steps = 6
-  for (let k = 1; k < steps; k += 1) {
-    const angle = heading + (Math.PI / 2) * direction - (Math.PI * k) / steps * direction
+// addDisc walks a ring around one node in WORLD space, so it stays a disc under
+// the tilted projection as well.
+//
+// The ring is wound the SAME way round as the trapezoids. Nonzero filling
+// cancels where two sub-paths of opposite winding overlap, and a ring wound the
+// other way punches a hole out of the segment it was meant to weld — which
+// shows up as a row of notches down the middle of the road.
+function addDisc(path, node, projection, grow) {
+  const radius = Math.max(0.15, node[3] / 2 + grow / 2)
+  const steps = 8
+  for (let k = 0; k < steps; k += 1) {
+    const angle = -(k / steps) * Math.PI * 2
     const point = projection.project(
-      nodes[index][0] + Math.cos(angle) * reach,
-      nodes[index][1] + Math.sin(angle) * reach,
-      nodes[index][2]
+      node[0] + Math.cos(angle) * radius,
+      node[1] + Math.sin(angle) * radius,
+      node[2]
     )
-    path.lineTo(point[0], point[1])
+    if (k === 0) path.moveTo(point[0], point[1])
+    else path.lineTo(point[0], point[1])
   }
+  path.closePath()
 }
 
 /* ------------------------------------------------------------- track map */

@@ -48,6 +48,10 @@ const state = {
   // gesture that is drawing it.
   selection: null,
   selecting: null,
+  // 'north' keeps the world upright; 'heading' turns the map so the direction of
+  // travel points up, the way a phone navigates.
+  mapOrientation: 'north',
+  mapHeading: 0,
   playback: { playing: false, speed: 1, loop: true, time: 0, handle: null }
 }
 
@@ -89,6 +93,7 @@ const I18N = {
     pinned: '已锁定', pinRelease: '释放（Esc）', pinCentre: '把地图移到锁定点',
     pinHint: '点击锁定游标 · 锁定后移到另一侧不会丢位置',
     selectHint: '右键或 Ctrl 拖动框选一段',
+    orientHeading: '切换为行进方向朝上', orientNorth: '切换为正北朝上',
     play: '播放所选区间', pause: '暂停', loop: '循环',
     selectionNone: '未选区间（播放整圈）',
     zoomHint: '滚轮缩放 · 拖动平移 · 双击还原',
@@ -160,6 +165,7 @@ const I18N = {
     pinned: 'Pinned', pinRelease: 'Release (Esc)', pinCentre: 'Bring the map to the pinned point',
     pinHint: 'Click to pin the cursor · a pinned position survives moving to the other pane',
     selectHint: 'Right-drag or Ctrl-drag to select a stretch',
+    orientHeading: 'Turn the map heading-up', orientNorth: 'Turn the map north-up',
     play: 'Play the selected stretch', pause: 'Pause', loop: 'Loop',
     selectionNone: 'No selection (plays the whole lap)',
     zoomHint: 'Wheel to zoom · drag to pan · double-click to reset',
@@ -200,6 +206,7 @@ const I18N = {
 const LANG_STORAGE = 'ghostRacerWeb.lang'
 const THEME_STORAGE = 'ghostRacerWeb.theme'
 const PANEL_STORAGE = 'ghostRacerWeb.panels'
+const ORIENTATION_STORAGE = 'ghostRacerWeb.mapOrientation'
 
 function t(key, ...args) {
   const table = I18N[state.lang] || I18N.en
@@ -1585,6 +1592,67 @@ function colorForKey(key, entry) {
 
 // mapProjection fits every selected lap into the canvas, then applies the
 // reader's zoom and pan on top of that fit.
+// The anchor sits below the middle, the way a navigation view leaves room for
+// the road ahead.
+const HEADING_ANCHOR_Y = 0.62
+// Half-length of the chord the heading is taken from, in metres.
+const HEADING_WINDOW = 12
+const HEADING_WINDOW_MAX = 40
+
+// pathHeadingAt is the direction of TRAVEL at a sample, taken as the chord
+// between points a fixed distance behind and ahead along the lap.
+//
+// The recorded forward vector is the wrong source here: mid-drift the car points
+// somewhere quite else than where it is going, and a spin would spin the whole
+// map with it. A chord measured in metres is also immune to standing still,
+// where a fixed number of samples covers no ground at all and the angle is pure
+// noise.
+function pathHeadingAt(entry, index) {
+  const channels = entry.lap.channels
+  const dist = channels.dist
+  const total = dist.length
+  if (total < 2) return null
+
+  for (let window = HEADING_WINDOW; window <= HEADING_WINDOW_MAX; window *= 2) {
+    let back = index
+    while (back > 0 && dist[index] - dist[back] < window) back -= 1
+    let ahead = index
+    while (ahead < total - 1 && dist[ahead] - dist[index] < window) ahead += 1
+    const dx = channels.x[ahead] - channels.x[back]
+    const dy = channels.y[ahead] - channels.y[back]
+    // A chord this short means the car was parked, reversing, or spinning on the
+    // spot: widen the window rather than take the angle of noise.
+    if (dx * dx + dy * dy > 4) return Math.atan2(dy, dx)
+  }
+  return null
+}
+
+// mapAnchor is the world point the heading-up view is built around: where the
+// cursor is on the reference lap, and which way it was going.
+function mapAnchor() {
+  if (state.cursorX == null) return null
+  const reference = referenceLap()
+  const entries = loadedEntries()
+  const ordered = reference ? [reference, ...entries.filter((e) => e !== reference)] : entries
+  for (const entry of ordered) {
+    if (!entry.lap) continue
+    const values = axisValues(entry.lap)
+    if (!values.length || values[values.length - 1] < state.cursorX) continue
+    const index = indexAt(values, state.cursorX)
+    if (index < 0) continue
+    const heading = pathHeadingAt(entry, index)
+    // Holding the last heading is what keeps a spin or a stop from whipping the
+    // map around; the position still tracks.
+    if (heading != null) state.mapHeading = heading
+    return { x: entry.lap.channels.x[index], y: entry.lap.channels.y[index], heading: state.mapHeading }
+  }
+  return null
+}
+
+function headingUpActive() {
+  return state.mapOrientation === 'heading' && mapAnchor() != null
+}
+
 function mapProjection(entries, width, height) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
   for (const entry of entries) {
@@ -1600,6 +1668,34 @@ function mapProjection(entries, width, height) {
   const offsetY = (height - spanY * scale) / 2
   // BeamNG world Y grows north; canvas Y grows down.
   const view = state.mapView
+  const anchor = state.mapOrientation === 'heading' ? mapAnchor() : null
+  if (anchor) {
+    // Heading up: drop the fit's centring, put the anchor where a navigation
+    // view puts you, and turn the world so the direction of travel points up.
+    const total = scale * view.scale
+    const theta = Math.PI / 2 - anchor.heading
+    const cos = Math.cos(theta)
+    const sin = Math.sin(theta)
+    const originX = width / 2
+    const originY = height * HEADING_ANCHOR_Y
+    return {
+      width,
+      height,
+      scale: total,
+      headingUp: true,
+      centreX: originX,
+      centreY: originY,
+      project: (x, y) => {
+        const dx = x - anchor.x
+        const dy = y - anchor.y
+        return [
+          originX + view.panX + (dx * cos - dy * sin) * total,
+          originY + view.panY - (dx * sin + dy * cos) * total
+        ]
+      }
+    }
+  }
+
   const centreX = width / 2
   const centreY = height / 2
   return {
@@ -1609,6 +1705,9 @@ function mapProjection(entries, width, height) {
     width,
     height,
     scale: scale * view.scale,
+    headingUp: false,
+    centreX,
+    centreY,
     project: (x, y) => {
       const baseX = offsetX + (x - minX) * scale
       const baseY = height - (offsetY + (y - minY) * scale)
@@ -1618,6 +1717,15 @@ function mapProjection(entries, width, height) {
       ]
     }
   }
+}
+
+function setMapOrientation(mode) {
+  state.mapOrientation = mode
+  writeSetting(ORIENTATION_STORAGE, mode)
+  state.mapView.panX = 0
+  state.mapView.panY = 0
+  updateZoomControls()
+  scheduleRedraw()
 }
 
 function resetMapView() {
@@ -1633,6 +1741,12 @@ function resetRange() {
 }
 
 function updateZoomControls() {
+  const orient = el('mapOrient')
+  const headingUp = state.mapOrientation === 'heading'
+  orient.textContent = headingUp ? '▲' : 'N'
+  orient.classList.toggle('active', headingUp)
+  orient.title = headingUp ? t('orientNorth') : t('orientHeading')
+
   const mapReset = el('mapReset')
   mapReset.hidden = state.mapView.scale <= 1.001
   const rangeReset = el('rangeReset')
@@ -1676,8 +1790,15 @@ function drawMap() {
   }
 
   const view = state.mapView
+  // Heading up, the whole picture turns and slides with the cursor, so the
+  // cached layer is keyed on the anchor as well. Quantizing keeps a jittering
+  // last digit from forcing a repaint that changes nothing visible.
+  const anchor = state.mapOrientation === 'heading' ? mapAnchor() : null
+  const orientationKey = anchor
+    ? `h${anchor.heading.toFixed(3)}:${anchor.x.toFixed(1)}:${anchor.y.toFixed(1)}`
+    : 'n'
   const key = [width, height, state.colorMode, state.referenceKey, state.lang, effectiveTheme(),
-    view.scale.toFixed(3), view.panX.toFixed(1), view.panY.toFixed(1),
+    view.scale.toFixed(3), view.panX.toFixed(1), view.panY.toFixed(1), orientationKey,
     state.sectors ? state.sectors.signature : '', selectionSignature()].join('~')
   const scales = colorScales()
   if (mapLayer.key !== key || mapLayer.width !== width || mapLayer.height !== height || mapLayer.ratio !== ratio) {
@@ -2718,8 +2839,8 @@ function attachMapZoom() {
     const view = state.mapView
     const next = clamp(view.scale * Math.exp(-event.deltaY * 0.0015), 1, 40)
     const projection = state.mapProjection
-    const centreX = (projection ? projection.width : rect.width) / 2
-    const centreY = (projection ? projection.height : rect.height) / 2
+    const centreX = projection ? projection.centreX : rect.width / 2
+    const centreY = projection ? projection.centreY : rect.height / 2
     // Keep the world point under the pointer pinned to the pointer.
     const baseX = (pointerX - centreX - view.panX) / view.scale + centreX
     const baseY = (pointerY - centreY - view.panY) / view.scale + centreY
@@ -2763,6 +2884,8 @@ function attachMapZoom() {
   })
   canvas.addEventListener('dblclick', resetMapView)
   el('mapReset').addEventListener('click', resetMapView)
+  el('mapOrient').addEventListener('click', () =>
+    setMapOrientation(state.mapOrientation === 'heading' ? 'north' : 'heading'))
 }
 
 // attachChartZoom: the charts share one X window, so zooming any of them zooms
@@ -2942,6 +3065,8 @@ function followCursorOnMap() {
   const view = state.mapView
   const projection = state.mapProjection
   if (view.scale <= 1.001 || state.cursorX == null || state.mapDrag || !projection) return
+  // Heading up keeps the cursor at the anchor by construction.
+  if (state.mapOrientation === 'heading') return
 
   const anchor = cursorAnchor()
   if (!anchor) return
@@ -3126,6 +3251,7 @@ function render() {
 function wire() {
   state.collapsed = loadTreeState()
   state.panels = loadPanels()
+  state.mapOrientation = readSetting(ORIENTATION_STORAGE, 'north') === 'heading' ? 'heading' : 'north'
   state.lang = detectLanguage()
   state.theme = readSetting(THEME_STORAGE, 'auto')
   applyTheme()

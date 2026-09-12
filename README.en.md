@@ -75,6 +75,19 @@ The **bottom-right of the map** carries in-game style vertical gauges: one clust
 
 **The recording list above and the summary/sectors panel below both collapse** (the caret in their headers), handing all of the room to the map and the charts. The state is remembered in the browser.
 
+**The map can face the direction of travel** (`N` / `▲` in its corner), the way a phone navigates: the current point sits low in the view, the road ahead points up, and the map turns. The choice is remembered.
+
+The heading comes from the **tangent of the path, never from the car's own facing** — that is what keeps it steady. Mid-drift the car is sideways and the driver is sawing at the wheel, but the direction of travel is smooth. The tangent is taken over a window measured in **metres** (12 m either side, widened to 40 m when that degenerates), so crawling, stopping or spinning on the spot cannot turn the angle into noise; if it degenerates anyway the previous heading is held while the position keeps tracking.
+
+Measured on synthesised drift and spin data, sampled every other point:
+
+| | Path tangent (this) | Car's facing |
+| --- | --- | --- |
+| Drift (car sideways, sawing at the wheel) | 0.54° max step, **0 reversals** | 14.56°, **18 reversals** |
+| Spin on the spot (position frozen, two full turns) | 14.77°, 0 reversals | 116°, 2 reversals |
+
+Through a drift the map barely moves; taken from the car's facing it would shake back and forth eighteen times. Over a normal lap the largest step is 0.92° per 2 m.
+
 **A zoomed map follows the cursor.** Moving the cursor on the charts — or hovering a row in the sector table — pans the map when the matching point approaches the edge, by the least amount that brings it back inside, so scrubbing looks like the map sliding along with the point. Only a jump of more than a screen (landing on a different sector, say) recentres outright. Over a 1200-step sweep of a whole lap at 23× zoom the point never left the viewport once. Dragging the map yourself, or hovering directly on it, never triggers the follow.
 
 Switching between the distance and time axis clears the window, since a range in metres does not carry over to seconds. While zoomed, the map culls segments outside the viewport, so drawing gets cheaper the further you zoom in.

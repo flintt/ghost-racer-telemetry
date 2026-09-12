@@ -1229,8 +1229,19 @@ function renderSectorTable(container) {
       : formatDelta(-run.versusReference)
     versus.className = run.versusReference >= 0 ? 'neg' : 'pos'
 
-    // Hovering a row parks the cursor in that stretch on every chart and the map.
-    row.addEventListener('mouseenter', () => setCursor((run.from + run.to) / 2))
+    // Hovering a row parks the cursor in that stretch on every chart and the
+    // map. Stretches are measured in metres, so on the time axis the middle of
+    // the stretch has to be turned into the reference lap's time there.
+    row.addEventListener('mouseenter', () => {
+      const middle = (run.from + run.to) / 2
+      if (state.axis === 'dist') {
+        setCursor(middle, 'table')
+        return
+      }
+      const anchor = reference && reference.stations ? reference : run.entry
+      if (!anchor || !anchor.stations) return
+      setCursor(interpolate(anchor.stations, anchor.lap.channels.t, middle), 'table')
+    })
   }
   container.append(table)
 }
@@ -2130,9 +2141,9 @@ function attachCursor(canvas) {
     const rect = canvas.getBoundingClientRect()
     const { left, plotWidth, from, span } = chart.geometry
     const ratio = (event.clientX - rect.left - left) / plotWidth
-    setCursor(Math.max(from, Math.min(from + span, from + ratio * span)))
+    setCursor(Math.max(from, Math.min(from + span, from + ratio * span)), 'chart')
   })
-  canvas.addEventListener('mouseleave', () => setCursor(null))
+  canvas.addEventListener('mouseleave', () => setCursor(null, 'chart'))
 }
 
 function attachMapCursor() {
@@ -2167,9 +2178,9 @@ function attachMapCursor() {
     }
     if (!best || best.distance > 40 ** 2) return
     state.hoverLapKey = lapKey(best.entry)
-    setCursor(axisValues(best.entry.lap)[best.index])
+    setCursor(axisValues(best.entry.lap)[best.index], 'map')
   })
-  canvas.addEventListener('mouseleave', () => setCursor(null))
+  canvas.addEventListener('mouseleave', () => setCursor(null, 'map'))
 }
 
 /* ------------------------------------------------------------------ zoom */
@@ -2282,10 +2293,72 @@ function attachDragging() {
   })
 }
 
-function setCursor(value) {
+// setCursor moves the shared cursor. `source` says where the move came from:
+// a cursor driven from the charts or the sector table has to drag the zoomed
+// map along with it, or the point it refers to sits off screen.
+function setCursor(value, source) {
   if (state.cursorX === value) return
   state.cursorX = value
+  if (source !== 'map') followCursorOnMap()
   scheduleRedraw()
+}
+
+// cursorAnchor is the projected point the map should keep in view: the
+// reference lap's position at the cursor, or the first lap that still has data
+// there when the reference has already ended.
+function cursorAnchor() {
+  if (!state.mapProjected) return null
+  const reference = referenceLap()
+  const ordered = state.mapProjected.slice().sort((a, b) => {
+    if (!reference) return 0
+    return (lapKey(b.entry) === lapKey(reference)) - (lapKey(a.entry) === lapKey(reference))
+  })
+  for (const projected of ordered) {
+    const values = axisValues(projected.entry.lap)
+    if (!values.length || values[values.length - 1] < state.cursorX) continue
+    const index = indexAt(values, state.cursorX)
+    if (index < 0) continue
+    return { x: projected.points[index * 2], y: projected.points[index * 2 + 1] }
+  }
+  return null
+}
+
+// followCursorOnMap recentres the zoomed map when the cursor leaves the middle
+// of the viewport. Recentring on every step would make the map crawl under the
+// reader; leaving it alone until the point nears an edge keeps it still for
+// most of a scrub and never loses the point.
+function followCursorOnMap() {
+  const view = state.mapView
+  const projection = state.mapProjection
+  if (view.scale <= 1.001 || state.cursorX == null || state.mapDrag || !projection) return
+
+  const anchor = cursorAnchor()
+  if (!anchor) return
+  const { width, height } = projection
+  const marginX = width * 0.2
+  const marginY = height * 0.2
+
+  // Pan by the least that brings the point back inside the safe box. Scrubbing
+  // then slides the map smoothly along with the cursor instead of snapping it
+  // to the centre on every step.
+  let panX = 0
+  let panY = 0
+  if (anchor.x < marginX) panX = marginX - anchor.x
+  else if (anchor.x > width - marginX) panX = width - marginX - anchor.x
+  if (anchor.y < marginY) panY = marginY - anchor.y
+  else if (anchor.y > height - marginY) panY = height - marginY - anchor.y
+  if (panX === 0 && panY === 0) return
+
+  // A jump of more than a screen is not a scrub — it is the cursor landing
+  // somewhere else entirely (a sector row, say). Centre on it instead of
+  // dragging it in from off screen.
+  if (Math.abs(panX) > width * 0.75 || Math.abs(panY) > height * 0.75) {
+    panX = width / 2 - anchor.x
+    panY = height / 2 - anchor.y
+  }
+
+  view.panX += panX
+  view.panY += panY
 }
 
 let redrawHandle = null

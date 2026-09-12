@@ -126,6 +126,10 @@ const I18N = {
     sumElevation: '爬升 (m)', sumSamples: '采样点', sumVehicle: '车型',
     chartSpeed: '速度 (km/h)', chartDelta: 'Δt vs 参照圈 (s)', chartInputs: '油门 / 刹车 (%)',
     chartLatG: '横向 G', chartAccel: '纵向加速度 (m/s²)', chartGear: '档位',
+    chartElevation: '海拔 (m)', chartGradient: '坡度 (%)',
+    colorElevation: '海拔', colorGradient: '坡度',
+    sumMaxClimb: '最陡上坡', sumMaxDescent: '最陡下坡',
+    legendDown: '下坡', legendUp: '上坡',
     legendGearLow: '低档', legendGearHigh: '高档',
     legendDeltaGain: '追回时间', legendDeltaLoss: '丢失时间',
     legendBrake: '刹车', legendThrottle: '全油门',
@@ -200,6 +204,10 @@ const I18N = {
     sumElevation: 'Climb (m)', sumSamples: 'Samples', sumVehicle: 'Vehicle',
     chartSpeed: 'Speed (km/h)', chartDelta: 'Δt vs reference (s)', chartInputs: 'Throttle / brake (%)',
     chartLatG: 'Lateral G', chartAccel: 'Longitudinal accel (m/s²)', chartGear: 'Gear',
+    chartElevation: 'Elevation (m)', chartGradient: 'Gradient (%)',
+    colorElevation: 'Elevation', colorGradient: 'Gradient',
+    sumMaxClimb: 'Steepest climb', sumMaxDescent: 'Steepest descent',
+    legendDown: 'downhill', legendUp: 'uphill',
     legendGearLow: 'low gear', legendGearHigh: 'high gear',
     legendDeltaGain: 'gaining', legendDeltaLoss: 'losing',
     legendBrake: 'brake', legendThrottle: 'full throttle',
@@ -264,8 +272,8 @@ function applyStaticText() {
   ], state.filters.sort)
   fillSelect(el('colorMode'), [
     ['speed', t('colorSpeed')], ['throttle', t('colorInputs')], ['gear', t('colorGear')],
-    ['latg', t('colorLatG')], ['delta', t('colorDelta')], ['sector', t('colorSector')],
-    ['lap', t('colorPerLap')]
+    ['latg', t('colorLatG')], ['elevation', t('colorElevation')], ['gradient', t('colorGradient')],
+    ['delta', t('colorDelta')], ['sector', t('colorSector')], ['lap', t('colorPerLap')]
   ], state.colorMode)
   for (const node of el('langMode').children) {
     node.classList.toggle('active', node.dataset.lang === state.lang)
@@ -1227,6 +1235,8 @@ const SUMMARY_ROWS = [
   { key: 'sumBraking', get: (lap) => (lap.hasInputs ? `${lap.summary.brakingPct.toFixed(1)}%` : '—') },
   { key: 'sumCoasting', get: (lap) => (lap.hasInputs ? `${lap.summary.coastingPct.toFixed(1)}%` : '—') },
   { key: 'sumElevation', get: (lap) => lap.summary.elevationGain.toFixed(0) },
+  { key: 'sumMaxClimb', get: (lap) => `${(lap.summary.maxGradient || 0).toFixed(1)}%` },
+  { key: 'sumMaxDescent', get: (lap) => `${(lap.summary.minGradient || 0).toFixed(1)}%` },
   { key: 'sumSamples', get: (lap) => String(lap.summary.sampleCount) },
   { key: 'sumVehicle', get: (lap) => lap.vehicle || '—' }
 ]
@@ -1567,7 +1577,14 @@ function colorScales() {
   let speedMax = -Infinity
   let latgMax = 0.1
   let deltaRate = 0.02
+  let elevationMin = Infinity
+  let elevationMax = -Infinity
+  let gradientMax = 1
   for (const entry of loadedEntries()) {
+    elevationMin = Math.min(elevationMin, entry.lap.summary.minZ)
+    elevationMax = Math.max(elevationMax, entry.lap.summary.maxZ)
+    gradientMax = Math.max(gradientMax,
+      Math.abs(entry.lap.summary.maxGradient || 0), Math.abs(entry.lap.summary.minGradient || 0))
     speedMin = Math.min(speedMin, entry.lap.summary.minSpeed)
     speedMax = Math.max(speedMax, entry.lap.summary.topSpeed)
     latgMax = Math.max(latgMax, entry.lap.summary.maxLatG)
@@ -1578,7 +1595,11 @@ function colorScales() {
     }
   }
   if (!isFinite(speedMin)) { speedMin = 0; speedMax = 1 }
-  return { speedMin, speedMax, speedSpan: speedMax - speedMin, latgMax, deltaRate }
+  if (!isFinite(elevationMin)) { elevationMin = 0; elevationMax = 1 }
+  return {
+    speedMin, speedMax, speedSpan: speedMax - speedMin, latgMax, deltaRate,
+    elevationMin, elevationSpan: Math.max(1, elevationMax - elevationMin), gradientMax
+  }
 }
 
 // pointColorKey returns a small integer identifying a sample's colour, so runs
@@ -1599,6 +1620,11 @@ function pointColorKey(entry, index, scales) {
       return bucket(Math.max(0, Math.min(8, channels.gear[index])) / 8)
     case 'latg':
       return bucket(0.5 + channels.latG[index] / (2 * (scales.latgMax || 1)))
+    case 'elevation':
+      return bucket((channels.z[index] - scales.elevationMin) / scales.elevationSpan)
+    case 'gradient':
+      if (!channels.gradient) return -1
+      return bucket(0.5 + channels.gradient[index] / (2 * scales.gradientMax))
     case 'delta': {
       if (!entry.delta) return -1
       const rate = entry.delta[index] - (entry.delta[Math.max(0, index - 25)] || 0)
@@ -1619,7 +1645,9 @@ function colorForKey(key, entry) {
   if (key === 300) return COAST_COLOR
   if (key >= 200) return palette(THROTTLE_RAMP)[key - 200]
   if (key >= 100) return palette(BRAKE_RAMP)[key - 100]
-  return palette(state.colorMode === 'latg' || state.colorMode === 'delta' ? DIVERGING : SPEED_RAMP)[key]
+  const diverging = state.colorMode === 'latg' || state.colorMode === 'delta' ||
+    state.colorMode === 'gradient'
+  return palette(diverging ? DIVERGING : SPEED_RAMP)[key]
 }
 
 // mapProjection fits every selected lap into the canvas, then applies the
@@ -1637,6 +1665,10 @@ const TILT_CAMERA = 0.9
 // Ground behind the camera cannot be drawn; those points are pushed far off
 // screen so the existing viewport culling lifts the pen over them.
 const TILT_MIN_DEPTH = 0.15
+// Real relief is small next to a lap's horizontal extent — a 6 m rise over 2 km
+// would be a couple of pixels. Terrain views exaggerate for exactly this reason;
+// the height is honest, the emphasis is not.
+const TILT_HEIGHT_SCALE = 2.5
 const OFF_SCREEN = 1e6
 // Half-length of the chord the heading is taken from, in metres.
 const HEADING_WINDOW = 12
@@ -1687,7 +1719,12 @@ function mapAnchor() {
     // Holding the last heading is what keeps a spin or a stop from whipping the
     // map around; the position still tracks.
     if (heading != null) state.mapHeading = heading
-    return { x: entry.lap.channels.x[index], y: entry.lap.channels.y[index], heading: state.mapHeading }
+    return {
+      x: entry.lap.channels.x[index],
+      y: entry.lap.channels.y[index],
+      z: entry.lap.channels.z[index],
+      heading: state.mapHeading
+    }
   }
   return null
 }
@@ -1734,7 +1771,7 @@ function mapProjection(entries, width, height) {
       tilted,
       centreX: originX,
       centreY: originY,
-      project: (x, y) => {
+      project: (x, y, z) => {
         const dx = x - anchor.x
         const dy = y - anchor.y
         // Into car space: lateral to the right, forward up the screen.
@@ -1743,13 +1780,15 @@ function mapProjection(entries, width, height) {
         if (!tilted) {
           return [originX + view.panX + lateral, originY + view.panY - forward]
         }
-        // Perspective divide: ground far ahead converges toward the horizon and
-        // narrows, ground behind the camera is dropped.
-        const depth = 1 + (forward * tiltSin) / camera
+        // Height above the car, which a tilted camera sees: looking straight
+        // down it would contribute nothing, looking level it would be all of it,
+        // hence sin/cos of the pitch. Raising a point also brings it nearer.
+        const height = (z == null ? 0 : (z - anchor.z) * TILT_HEIGHT_SCALE) * total
+        const depth = 1 + (forward * tiltSin - height * tiltCos) / camera
         if (depth < TILT_MIN_DEPTH) return [OFF_SCREEN, OFF_SCREEN]
         return [
           originX + view.panX + lateral / depth,
-          originY + view.panY - (forward * tiltCos) / depth
+          originY + view.panY - (forward * tiltCos + height * tiltSin) / depth
         ]
       }
     }
@@ -1842,7 +1881,7 @@ function projectEntries(entries, projection) {
     const total = channels.x.length
     const points = new Float32Array(total * 2)
     for (let i = 0; i < total; i += 1) {
-      const [px, py] = projection.project(channels.x[i], channels.y[i])
+      const [px, py] = projection.project(channels.x[i], channels.y[i], channels.z[i])
       points[i * 2] = px
       points[i * 2 + 1] = py
     }
@@ -2263,6 +2302,9 @@ function renderLegend(scales) {
     speed: [`${kmh(scales.speedMin).toFixed(0)} km/h`, `${kmh(scales.speedMax).toFixed(0)} km/h`, SPEED_RAMP],
     gear: [t('legendGearLow'), t('legendGearHigh'), SPEED_RAMP],
     latg: [`-${scales.latgMax.toFixed(1)} G`, `+${scales.latgMax.toFixed(1)} G`, DIVERGING],
+    elevation: [`${scales.elevationMin.toFixed(0)} m`,
+      `${(scales.elevationMin + scales.elevationSpan).toFixed(0)} m`, SPEED_RAMP],
+    gradient: [`-${scales.gradientMax.toFixed(1)}%`, `+${scales.gradientMax.toFixed(1)}%`, DIVERGING],
     delta: [t('legendDeltaGain'), t('legendDeltaLoss'), DIVERGING],
     throttle: [t('legendBrake'), t('legendThrottle'), ['#ff2d2d', COAST_COLOR, '#3ddc97']],
     sector: null,
@@ -2314,6 +2356,17 @@ const CHART_DEFS = [
   {
     id: 'accel', labelKey: 'chartAccel', height: 96, zeroLine: true,
     series: (entry) => [{ values: entry.lap.channels.accel, color: entry.color }]
+  },
+  {
+    id: 'elevation', labelKey: 'chartElevation', height: 90,
+    series: (entry) => [{ values: entry.lap.channels.z, color: entry.color }]
+  },
+  {
+    id: 'gradient', labelKey: 'chartGradient', height: 90, zeroLine: true,
+    enabled: () => state.selected.some((entry) => entry.lap && entry.lap.channels.gradient),
+    series: (entry) => (entry.lap.channels.gradient
+      ? [{ values: entry.lap.channels.gradient, color: entry.color }]
+      : [])
   },
   {
     id: 'gear', labelKey: 'chartGear', height: 84, step: true,
@@ -3352,6 +3405,7 @@ function renderReadout() {
         parts.push(`${t('readoutGear')}<b>${channels.gear[index].toFixed(0)}</b>`)
       }
       parts.push(`${channels.latG[index].toFixed(2)}G`)
+      if (channels.gradient) parts.push(`${channels.gradient[index].toFixed(1)}%`)
       if (entry.delta) {
         const delta = entry.delta[index]
         parts.push(`<b class="${delta >= 0 ? 'pos' : 'neg'}">${formatDelta(delta)}</b>`)

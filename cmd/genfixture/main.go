@@ -15,6 +15,7 @@ import (
 func main() {
 	out := flag.String("out", "testdata/ghostReplays", "directory to write the fixture into")
 	size := flag.Float64("size", 1, "circuit size multiplier; raises the sample count per lap")
+	relief := flag.Float64("relief", 1, "elevation amplitude multiplier, for exercising gradient and the tilted view")
 	flag.Parse()
 
 	level := "east_coast_usa"
@@ -57,7 +58,7 @@ func main() {
 			// Each lap is stronger in different parts of the circuit, so the
 			// sector analysis has something real to find.
 			phase := float64(lap) * 1.7
-			samples, lapTime := generateLap(random, pace, complete, start.seed, *size, phase)
+			samples, lapTime := generateLap(random, pace, complete, start.seed, *size, phase, *relief)
 
 			envelope := map[string]any{
 				"formatVersion":  2,
@@ -156,7 +157,7 @@ func sourceFor(manual, complete bool) string {
 
 // generateLap drives a closed circuit made of straights and corners, producing
 // plausible speed, throttle and brake traces at 50 Hz.
-func generateLap(random *rand.Rand, pace float64, complete bool, seed int64, size float64, phase float64) ([][]float64, float64) {
+func generateLap(random *rand.Rand, pace float64, complete bool, seed int64, size float64, phase float64, relief float64) ([][]float64, float64) {
 	const interval = 0.02
 	radiusX, radiusY := 220.0*size, 130.0*size
 	samples := [][]float64{}
@@ -176,7 +177,7 @@ func generateLap(random *rand.Rand, pace float64, complete bool, seed int64, siz
 
 		x := radiusX * math.Cos(angle)
 		y := radiusY*math.Sin(angle) + 30*math.Sin(angle*3)
-		z := 12 + 6*math.Sin(angle*2)
+		z := 12 + 6*relief*math.Sin(angle*2)
 
 		next := angle + 0.004
 		dx := -radiusX * math.Sin(next)

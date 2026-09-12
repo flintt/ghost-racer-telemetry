@@ -280,3 +280,73 @@ func TestResolveSamplePathRejectsEscape(t *testing.T) {
 		t.Fatal("a path escaping the root must not resolve")
 	}
 }
+
+// writeSlopeFixture lays down one lap climbing a known, constant slope.
+func writeSlopeFixture(t *testing.T, percent float64) (string, *Library) {
+	t.Helper()
+	root := t.TempDir()
+	base := filepath.Join(root, "freeRoam", "hill", "starts", "s001")
+	if err := os.MkdirAll(filepath.Join(base, "ghostracer.save.ghosts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string, value any) {
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 200 m of travel at 10 m/s, rising `percent` metres per 100 m of ground.
+	samples := [][]float64{}
+	for i := 0; i <= 1000; i++ {
+		time := float64(i) * 0.02
+		along := 10 * time
+		samples = append(samples, []float64{
+			time, along, 0, 100 + along*percent/100, 1, 0, 0, 0, 0, 1, 10,
+		})
+	}
+	write(filepath.Join(base, "ghostracer.save.ghosts", "g000001.json"), map[string]any{
+		"formatVersion": 2, "sampleInterval": 0.02, "lapTime": 20.0,
+		"vehicle": "sunburst", "complete": true, "samples": samples,
+	})
+	write(filepath.Join(base, "ghostracer.save.library.json"), map[string]any{
+		"formatVersion": 1, "nextId": 2,
+		"ghosts": []any{map[string]any{
+			"id": "g000001", "label": "Climb", "lapTime": 20.0, "complete": true,
+			"file": "ghostReplays/freeRoam/hill/starts/s001/ghostracer.save.ghosts/g000001.json",
+		}},
+	})
+	scanner := NewScanner([]Root{{Name: "game", Path: root}})
+	return root, scanner.Scan().Libraries[0]
+}
+
+func TestGradientMatchesTheSlope(t *testing.T) {
+	const percent = 8.0
+	root, library := writeSlopeFixture(t, percent)
+	lap, err := LoadLap(root, library, "g000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Away from the ends, where the window is one-sided, every sample should
+	// report the slope it was built with.
+	for _, index := range []int{200, 500, 800} {
+		if math.Abs(lap.Channels.Gradient[index]-percent) > 0.05 {
+			t.Errorf("gradient at %d = %.3f%%, want %g%%", index, lap.Channels.Gradient[index], percent)
+		}
+	}
+	if math.Abs(lap.Summary.MaxGradient-percent) > 0.05 {
+		t.Errorf("max gradient = %.3f%%, want %g%%", lap.Summary.MaxGradient, percent)
+	}
+	// A climb of 8 m per 100 m over 200 m of ground is 16 m, and the travelled
+	// distance is the hypotenuse rather than the ground run.
+	if math.Abs(lap.Summary.ElevationGain-16) > 0.2 {
+		t.Errorf("climb = %.2f m, want 16", lap.Summary.ElevationGain)
+	}
+	if lap.Summary.Distance <= 200 {
+		t.Errorf("distance %.2f m should exceed the 200 m ground run", lap.Summary.Distance)
+	}
+}

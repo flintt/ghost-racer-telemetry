@@ -61,6 +61,8 @@ type Summary struct {
 	BrakingPct      float64    `json:"brakingPct"`
 	CoastingPct     float64    `json:"coastingPct"`
 	ElevationGain   float64    `json:"elevationGain"`
+	MaxGradient     float64    `json:"maxGradient"`
+	MinGradient     float64    `json:"minGradient"`
 	MinZ            float64    `json:"minZ"`
 	MaxZ            float64    `json:"maxZ"`
 	Bounds          [4]float64 `json:"bounds"`
@@ -75,6 +77,7 @@ type Channels struct {
 	Z         []float64 `json:"z"`
 	Speed     []float64 `json:"speed"`
 	Accel     []float64 `json:"accel"`
+	Gradient  []float64 `json:"gradient"`
 	LatG      []float64 `json:"latG"`
 	Heading   []float64 `json:"heading"`
 	Throttle  []float64 `json:"throttle,omitempty"`
@@ -85,6 +88,11 @@ type Channels struct {
 }
 
 const gravity = 9.80665
+
+// Gradient is read over this much travelled distance either side. Differencing
+// neighbouring samples would measure the suspension, not the road: at 50 Hz two
+// samples are centimetres apart and the height noise swamps the slope.
+const gradientWindow = 10.0
 
 // ListLaps reads a library manifest and returns its laps, ranked by lap time.
 func ListLaps(rootPath string, library *Library) ([]LapMeta, error) {
@@ -319,6 +327,7 @@ func buildChannels(lap *Lap, envelope *Envelope) {
 	channels.Z = make([]float64, total)
 	channels.Speed = make([]float64, total)
 	channels.Accel = make([]float64, total)
+	channels.Gradient = make([]float64, total)
 	channels.LatG = make([]float64, total)
 	channels.Heading = make([]float64, total)
 	if hasInputs {
@@ -378,6 +387,7 @@ func buildChannels(lap *Lap, envelope *Envelope) {
 
 	deriveAccel(channels)
 	deriveLatG(channels)
+	deriveGradient(channels)
 
 	summary.Distance = round(distance, 2)
 	summary.Duration = channels.T[total-1] - channels.T[0]
@@ -398,6 +408,12 @@ func buildChannels(lap *Lap, envelope *Envelope) {
 	for _, value := range channels.LatG {
 		summary.MaxLatG = math.Max(summary.MaxLatG, math.Abs(value))
 	}
+	for _, value := range channels.Gradient {
+		summary.MaxGradient = math.Max(summary.MaxGradient, value)
+		summary.MinGradient = math.Min(summary.MinGradient, value)
+	}
+	summary.MaxGradient = round(summary.MaxGradient, 2)
+	summary.MinGradient = round(summary.MinGradient, 2)
 	summary.MaxAccel = round(summary.MaxAccel, 3)
 	summary.MaxDecel = round(summary.MaxDecel, 3)
 	summary.MaxLatG = round(summary.MaxLatG, 3)
@@ -456,6 +472,28 @@ func deriveLatG(channels *Channels) {
 		}
 		delta := wrapAngle(channels.Heading[high] - channels.Heading[low])
 		channels.LatG[i] = round(channels.Speed[i]*(delta/dt)/gravity, 3)
+	}
+}
+
+// deriveGradient is the road's slope as a percentage: metres climbed per 100
+// metres travelled, measured over a window in metres so that crawling does not
+// turn it into noise.
+func deriveGradient(channels *Channels) {
+	total := len(channels.Z)
+	for i := 0; i < total; i++ {
+		low := i
+		for low > 0 && channels.Dist[i]-channels.Dist[low] < gradientWindow {
+			low--
+		}
+		high := i
+		for high < total-1 && channels.Dist[high]-channels.Dist[i] < gradientWindow {
+			high++
+		}
+		run := channels.Dist[high] - channels.Dist[low]
+		if run <= 0 {
+			continue
+		}
+		channels.Gradient[i] = round((channels.Z[high]-channels.Z[low])/run*100, 3)
 	}
 }
 

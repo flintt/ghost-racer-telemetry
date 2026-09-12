@@ -195,3 +195,63 @@ func TestCacheIsInvalidatedWhenExtractionChanges(t *testing.T) {
 		t.Fatalf("a cache from an older extractor must be re-read, got %d roads", len(level.Roads))
 	}
 }
+
+func TestPrefabRoadsAreRead(t *testing.T) {
+	// A bridge is very often a prefab: its objects live in their own file, as one
+	// pretty-printed document rather than a line per object.
+	dir := t.TempDir()
+	levels := filepath.Join(dir, "content", "levels")
+	if err := os.MkdirAll(levels, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(filepath.Join(levels, "east_coast_usa.zip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	items, _ := writer.Create("levels/east_coast_usa/main/MissionGroup/ai_roads/items.level.json")
+	if _, err := items.Write([]byte(visibleRoad + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	prefab, _ := writer.Create("levels/east_coast_usa/main/MissionGroup/bridge.prefab.json")
+	pretty := `{
+	  "objects": [
+	    {
+	      "class": "MeshRoad",
+	      "material": "bridge_concrete",
+	      "nodes": [
+	        [300, 0, 20, 12, 1],
+	        [380, 0, 20, 12, 1]
+	      ]
+	    }
+	  ]
+	}`
+	if _, err := prefab.Write([]byte(pretty)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+
+	source, err := Locate(dir, "", "east_coast_usa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	level, err := Extract(source, "east_coast_usa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, road := range level.Roads {
+		if road.Class == "MeshRoad" && road.Material == "bridge_concrete" {
+			found = true
+			if len(road.Nodes) != 2 || road.Nodes[0][3] != 12 {
+				t.Errorf("prefab road decoded as %+v", road.Nodes)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the prefab's road was not read; got %d roads", len(level.Roads))
+	}
+}

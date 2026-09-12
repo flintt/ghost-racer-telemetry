@@ -73,6 +73,7 @@ go build -o ghost-racer-telemetry .   # Windows: GOOS=windows GOARCH=amd64 go bu
 - **按 `drivability` 过滤，不按材质**。`DecalRoad` 不是"路"这个类——人行道、停车位标线、路缘、地面裂纹、建筑周围的水泥裙边全是 DecalRoad，全画出来是一张镇子的平面图而不是赛道。游戏自己的判据是 drivability：BeamNG 的地图制作指南让作者**复制一条路、把材质改成 `road_invisible`、drivability 设成 1**，路才会出现在游戏内 minimap 上——也就是说 **minimap 画的就是这层"故意隐形但可驾驶"的 AI 路网**。所以隐形材质是"这是真路"的标志，反而要保留；该丢的是那些画上去的装饰贴花。
 - **路面画成一个整体**：逐段梯形 + **每个节点一个圆盘**，全部累积进一条路径**一次填充**（这是 BeamNG 导航 App 自己的画法：它对 navgraph 的每条 link 画梯形并在两端各加一个圆）。只在每条路的两端加圆是不够的——弯折处和路与路的接头都会裂。圆盘和梯形必须**同向缠绕**，否则 nonzero 规则会让它们互相抵消，在路中间挖出一排缺口。
 - **端口自动焊接**：短缝（路宽 + 4 米以内）按距离直接接上；长缝最远到 60 米，但**必须两端互相指向对方**才接——桥面是独立对象，两侧的路网可能差几十米，但它是**顺着自己的方向**停下的，横穿的路不会。两种判据都带高差限制（`2.5 + 缝长 × 0.15` 米），所以立交桥永远不会被粘到下面的路上。
+- **Prefab 里的路也读**：桥常常是预制件，对象存在独立的 `.prefab.json` 里而不是 `items.level.json`。这类文件是整篇 JSON 而不是按行的对象，所以按行解析找不到东西时会退回到**整篇文档递归遍历**，把任何 `class` 是 `DecalRoad`/`MeshRoad` 的对象捡出来。
 - **缓存带格式版本号**：只按存档大小和时间校验是不够的——存档没变，但解析器变了，旧缓存会让新增的解析（比如 MeshRoad 桥）完全不生效。
 - **桥和高架也读**：那些是 `MeshRoad`（节点比 DecalRoad 多一个深度值，前四个数含义相同），而且往往自身没有 drivability——按 drivability 过滤会恰好在桥这里把路面切断，所以 MeshRoad 不走 drivability 判据
 - `?visible=1` 可以反过来只要可见材质，`?mindriv=` 可以调阈值；`?stats=1` 会列出该关卡的材质分布（条数、节点数、可驾驶数、中位宽度），用来核对过滤规则
@@ -189,7 +190,7 @@ ghostReplays/freeRoam/<level>/<vehicleDir>/...                             2.9.8
 ```bash
 ./tools/check.sh                                        # gofmt + vet + test + 前端语法 + UI 冒烟 + 双平台编译
 ./tools/build.sh v0.1.0                                 # 打 release 产物到 dist/（4 个平台 + SHA256SUMS）
-./tools/smoke.sh                                        # 单跑冒烟：无头 Chrome 加载真实页面，有 JS 报错就失败
+./tools/smoke.sh                                        # 单跑冒烟：无头 Chrome 加载真实页面（含道路叠加），有 JS 报错就失败
 go run ./cmd/genfixture -out /tmp/gr/ghostReplays        # 造一份假的存档树
 go run ./cmd/genfixture -out /tmp/gr/ghostReplays -size 6  # 加大圈长（约 9500 采样点/圈）用来压渲染
 go run . -root /tmp/gr/ghostReplays -web ./web          # 前端改完刷新即可，不用重编译

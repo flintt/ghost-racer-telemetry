@@ -18,7 +18,7 @@ package roads
 
 import (
 	"archive/zip"
-	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -146,6 +146,14 @@ func findUnpackedLevel(modDir, level string) *Source {
 	return openDirectory(filepath.Join(modDir, "levels", level), level)
 }
 
+// carriesObjects says whether a file can hold level objects. Roads live in the
+// per-group items files, but a bridge is very often a prefab, whose objects sit
+// in a file of their own and would otherwise never be read.
+func carriesObjects(lowerName string) bool {
+	return strings.HasSuffix(lowerName, "items.level.json") ||
+		strings.HasSuffix(lowerName, ".prefab.json")
+}
+
 // levelPrefix is where a level's objects live inside an archive or a mod tree.
 func levelPrefix(level string) string {
 	return "levels/" + level + "/"
@@ -160,7 +168,7 @@ func openArchive(path, level string) *Source {
 	source := &Source{Description: path, closer: reader.Close}
 	for _, file := range reader.File {
 		name := strings.ToLower(filepath.ToSlash(file.Name))
-		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, "items.level.json") {
+		if !strings.HasPrefix(name, prefix) || !carriesObjects(name) {
 			continue
 		}
 		if file.UncompressedSize64 == 0 {
@@ -190,7 +198,7 @@ func openDirectory(root, level string) *Source {
 		if walkErr != nil || entry.IsDir() {
 			return nil
 		}
-		if !strings.EqualFold(entry.Name(), "items.level.json") {
+		if !carriesObjects(strings.ToLower(entry.Name())) {
 			return nil
 		}
 		name := path
@@ -238,42 +246,81 @@ func readItems(file itemsFile, into *Level) error {
 	if err != nil {
 		return err
 	}
-	defer stream.Close()
-
-	scanner := bufio.NewScanner(stream)
-	// Object lines carry whole roads and can be long.
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if len(line) < 2 || line[0] != '{' {
-			continue
-		}
-		// Cheap reject before spending a JSON parse on 2 000 other objects.
-		if !strings.Contains(line, `"DecalRoad"`) && !strings.Contains(line, `"MeshRoad"`) {
-			continue
-		}
-		var parsed item
-		if err := json.Unmarshal([]byte(line), &parsed); err != nil {
-			continue
-		}
-		if (parsed.Class != "DecalRoad" && parsed.Class != "MeshRoad") || len(parsed.Nodes) == 0 {
-			continue
-		}
-		road := buildRoad(&parsed)
-		if road == nil {
-			continue
-		}
-		into.Roads = append(into.Roads, road)
-		into.NodeCount += len(road.Nodes)
-		into.Bounds[0] = math.Min(into.Bounds[0], road.Bounds[0])
-		into.Bounds[1] = math.Min(into.Bounds[1], road.Bounds[1])
-		into.Bounds[2] = math.Max(into.Bounds[2], road.Bounds[2])
-		into.Bounds[3] = math.Max(into.Bounds[3], road.Bounds[3])
-	}
-	if err := scanner.Err(); err != nil && err != io.EOF {
+	data, err := io.ReadAll(io.LimitReader(stream, 64<<20))
+	stream.Close()
+	if err != nil {
 		return err
 	}
+	if !bytes.Contains(data, []byte(`"DecalRoad"`)) && !bytes.Contains(data, []byte(`"MeshRoad"`)) {
+		return nil
+	}
+
+	found := 0
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) < 2 || trimmed[0] != '{' {
+			continue
+		}
+		if road := roadFromJSON(trimmed); road != nil {
+			addRoad(into, road)
+			found++
+		}
+	}
+	if found > 0 {
+		return nil
+	}
+
+	// Prefabs are written as one pretty-printed document rather than a line per
+	// object, so walk the whole thing for anything shaped like a road.
+	var document any
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil
+	}
+	walkForRoads(document, into)
 	return nil
+}
+
+func roadFromJSON(raw []byte) *Road {
+	var parsed item
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil
+	}
+	if (parsed.Class != "DecalRoad" && parsed.Class != "MeshRoad") || len(parsed.Nodes) == 0 {
+		return nil
+	}
+	return buildRoad(&parsed)
+}
+
+// walkForRoads descends any JSON shape looking for road objects, because a
+// prefab can nest them under keys this package has no business knowing about.
+func walkForRoads(node any, into *Level) {
+	switch value := node.(type) {
+	case map[string]any:
+		if class, ok := value["class"].(string); ok && (class == "DecalRoad" || class == "MeshRoad") {
+			if encoded, err := json.Marshal(value); err == nil {
+				if road := roadFromJSON(encoded); road != nil {
+					addRoad(into, road)
+					return
+				}
+			}
+		}
+		for _, child := range value {
+			walkForRoads(child, into)
+		}
+	case []any:
+		for _, child := range value {
+			walkForRoads(child, into)
+		}
+	}
+}
+
+func addRoad(into *Level, road *Road) {
+	into.Roads = append(into.Roads, road)
+	into.NodeCount += len(road.Nodes)
+	into.Bounds[0] = math.Min(into.Bounds[0], road.Bounds[0])
+	into.Bounds[1] = math.Min(into.Bounds[1], road.Bounds[1])
+	into.Bounds[2] = math.Max(into.Bounds[2], road.Bounds[2])
+	into.Bounds[3] = math.Max(into.Bounds[3], road.Bounds[3])
 }
 
 func buildRoad(parsed *item) *Road {

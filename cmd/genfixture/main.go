@@ -3,9 +3,11 @@
 package main
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"os"
@@ -16,6 +18,7 @@ func main() {
 	out := flag.String("out", "testdata/ghostReplays", "directory to write the fixture into")
 	size := flag.Float64("size", 1, "circuit size multiplier; raises the sample count per lap")
 	relief := flag.Float64("relief", 1, "elevation amplitude multiplier, for exercising gradient and the tilted view")
+	gameOut := flag.String("game-out", "", "also write a fake BeamNG install whose level archive carries roads along the generated track")
 	flag.Parse()
 
 	level := "east_coast_usa"
@@ -134,7 +137,73 @@ func main() {
 	registry["lines"] = lines
 	writeJSON(filepath.Join(*out, "freeRoam", level, "startLines.json"), registry)
 
+	if *gameOut != "" {
+		writeLevelArchive(*gameOut, level, *size, *relief)
+		fmt.Printf("fake level archive written to %s\n", *gameOut)
+	}
 	fmt.Printf("fixture written to %s\n", *out)
+}
+
+// writeLevelArchive fakes a BeamNG install: one level archive whose drivable
+// roads follow the generated track, so the road overlay can be exercised without
+// the game installed.
+func writeLevelArchive(root, level string, size, relief float64) {
+	dir := filepath.Join(root, "content", "levels")
+	must(os.MkdirAll(dir, 0o755))
+	file, err := os.Create(filepath.Join(dir, level+".zip"))
+	must(err)
+	defer file.Close()
+
+	archive := zip.NewWriter(file)
+	entry, err := archive.Create(
+		"levels/" + level + "/main/MissionGroup/ai_roads/items.level.json")
+	must(err)
+
+	centre := func(angle float64) [3]float64 {
+		return [3]float64{
+			220 * size * math.Cos(angle),
+			130*size*math.Sin(angle) + 30*size*math.Sin(angle*3),
+			12 + 6*relief*math.Sin(angle*2),
+		}
+	}
+	// Several road objects meeting end to end, as a real level stores them.
+	const segments, per = 6, 40
+	for s := 0; s < segments; s++ {
+		nodes := [][]float64{}
+		for k := 0; k <= per; k++ {
+			angle := (float64(s) + float64(k)/per) * (2 * math.Pi / segments)
+			point := centre(angle)
+			nodes = append(nodes, []float64{
+				round(point[0], 3), round(point[1], 3), round(point[2], 3),
+				round(9+2*math.Sin(angle*2), 2),
+			})
+		}
+		writeJSONLine(entry, map[string]any{
+			"class": "DecalRoad", "persistentId": fmt.Sprintf("ai%d", s),
+			"__parent": "ai_roads", "material": "road_invisible",
+			"drivability": 1, "nodes": nodes,
+		})
+	}
+	// Decals with no drivability, which the overlay must leave out.
+	for i := 0; i < 20; i++ {
+		point := centre(float64(i) * 2 * math.Pi / 20)
+		writeJSONLine(entry, map[string]any{
+			"class": "DecalRoad", "persistentId": fmt.Sprintf("decal%d", i),
+			"__parent": "Decal_roads", "material": "m_dirt_variation_01",
+			"nodes": [][]float64{
+				{point[0] + 20, point[1] + 20, point[2], 6},
+				{point[0] + 34, point[1] + 29, point[2], 6},
+			},
+		})
+	}
+	must(archive.Close())
+}
+
+func writeJSONLine(writer io.Writer, value any) {
+	data, err := json.Marshal(value)
+	must(err)
+	_, err = writer.Write(append(data, '\n'))
+	must(err)
 }
 
 func vehicleFor(lap int) string {

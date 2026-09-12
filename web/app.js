@@ -1653,6 +1653,73 @@ function fillNetwork(context, projection, grow, colour) {
   context.fill(path)
 }
 
+// usable rejects a projected point that cannot be drawn: a malformed node, or
+// ground the tilted projection has pushed behind the camera, which comes back as
+// a sentinel far outside the canvas. Feeding those into a path degenerates the
+// whole fill.
+function usable(point) {
+  return Number.isFinite(point[0]) && Number.isFinite(point[1]) &&
+    Math.abs(point[0]) < 50000 && Math.abs(point[1]) < 50000
+}
+
+function validNode(node) {
+  return Array.isArray(node) && node.length >= 4 &&
+    Number.isFinite(node[0]) && Number.isFinite(node[1]) && Number.isFinite(node[3])
+}
+
+// addSegment lays a trapezoid between two nodes, honouring each one's width.
+function addSegment(path, from, to, projection, grow) {
+  if (!validNode(from) || !validNode(to)) return
+  const dx = to[0] - from[0]
+  const dy = to[1] - from[1]
+  const length = Math.hypot(dx, dy)
+  if (length === 0) return
+  const nx = -dy / length
+  const ny = dx / length
+  const fromHalf = Math.max(0.15, from[3] / 2 + grow / 2)
+  const toHalf = Math.max(0.15, to[3] / 2 + grow / 2)
+
+  const corners = [
+    projection.project(from[0] + nx * fromHalf, from[1] + ny * fromHalf, from[2]),
+    projection.project(to[0] + nx * toHalf, to[1] + ny * toHalf, to[2]),
+    projection.project(to[0] - nx * toHalf, to[1] - ny * toHalf, to[2]),
+    projection.project(from[0] - nx * fromHalf, from[1] - ny * fromHalf, from[2])
+  ]
+  for (const corner of corners) {
+    if (!usable(corner)) return
+  }
+  path.moveTo(corners[0][0], corners[0][1])
+  for (let i = 1; i < corners.length; i += 1) path.lineTo(corners[i][0], corners[i][1])
+  path.closePath()
+}
+
+// addDisc walks a ring around one node in WORLD space, so it stays a disc under
+// the tilted projection as well.
+//
+// The ring is wound the SAME way round as the trapezoids. Nonzero filling
+// cancels where two sub-paths of opposite winding overlap, and a ring wound the
+// other way punches a hole out of the segment it was meant to weld — which shows
+// up as a row of notches down the middle of the road.
+function addDisc(path, node, projection, grow) {
+  if (!validNode(node)) return
+  const radius = Math.max(0.15, node[3] / 2 + grow / 2)
+  const steps = 8
+  const ring = []
+  for (let k = 0; k < steps; k += 1) {
+    const angle = -(k / steps) * Math.PI * 2
+    const point = projection.project(
+      node[0] + Math.cos(angle) * radius,
+      node[1] + Math.sin(angle) * radius,
+      node[2]
+    )
+    if (!usable(point)) return
+    ring.push(point)
+  }
+  path.moveTo(ring[0][0], ring[0][1])
+  for (let k = 1; k < ring.length; k += 1) path.lineTo(ring[k][0], ring[k][1])
+  path.closePath()
+}
+
 // roadJoins finds pairs of road ends that belong together and returns the little
 // segments that close the gap between them.
 //
@@ -2079,7 +2146,17 @@ function drawMap() {
   }
   const buffer = ensureLayer(mapLayer, width, height, ratio, key, (target) => {
     // Roads first: the racing line belongs on top of the tarmac, not under it.
-    paintRoads(target, state.mapProjection)
+    // Guarded: the roads are an overlay built from someone else's files and must
+    // never be able to take the whole map down with them.
+    try {
+      paintRoads(target, state.mapProjection)
+    } catch (error) {
+      console.error('[ghost-racer] road rendering failed', error)
+      if (!state.roadsFailed) {
+        state.roadsFailed = true
+        toast(`${t('roadsUnavailable')} ${error.message}`, true)
+      }
+    }
     if (state.colorMode === 'sector') {
       // Everyone's line in grey first, then each lap's winning stretches on top:
       // otherwise the last lap drawn buries the ownership of the ones before it.
@@ -2092,6 +2169,9 @@ function drawMap() {
   })
 
   context.drawImage(buffer, 0, 0, width, height)
+  // Leaves the road count on the element: a diagnostic in the browser, and what
+  // the smoke test asserts on to prove the overlay actually drew something.
+  canvas.dataset.roads = state.showRoads && state.roads ? String(state.roads.roads.length) : '0'
   drawSelectionOnMap(context)
   drawMapCursor(context)
   drawSelectionBox(context)
@@ -3600,6 +3680,7 @@ function writeHash() {
   const reference = referenceLap()
   if (reference) parts.push(`ref=${reference.id}`)
   parts.push(`axis=${state.axis}`, `color=${state.colorMode}`)
+  if (state.showRoads) parts.push('roads=1')
   const hash = `#${parts.join('&')}`
   if (location.hash !== hash) history.replaceState(null, '', hash)
 }
@@ -3615,7 +3696,8 @@ function readHash() {
     laps: (params.get('laps') || '').split(',').filter(Boolean),
     reference: params.get('ref'),
     axis: params.get('axis'),
-    color: params.get('color')
+    color: params.get('color'),
+    roads: params.get('roads') === '1'
   }
 }
 
@@ -3630,6 +3712,7 @@ async function applyHash(request) {
     state.colorMode = request.color
     el('colorMode').value = request.color
   }
+  if (request.roads) state.showRoads = true
   await openLibrary(library, request.laps.length > 0)
   if (request.laps.length) {
     state.selected = []

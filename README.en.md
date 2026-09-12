@@ -56,6 +56,15 @@ To point it somewhere else:
 - **Summary**: lap time, distance, top/average/minimum speed, peak acceleration and braking, peak lateral G, full-throttle/braking/coasting share, climb, sample count and vehicle.
 - **Language** switches between English and Chinese (picked from the browser on first visit), and the **theme** has auto / light / dark (auto follows the system). Both choices are remembered in the browser.
 
+### Zooming
+
+The two panes zoom independently:
+
+- **Track map**: the wheel zooms about the pointer (up to 40×), dragging pans once zoomed, and a double-click or the **1:1** button in the corner restores the fit. The point under the pointer stays pinned, so putting the pointer on a corner and scrolling magnifies that corner.
+- **Charts**: the wheel zooms the X window (down to 1/500 of the lap), dragging pans, a double-click resets. All six charts share the window, and the cursor and readout follow it. **The Y axis is scaled to what is inside the window**, so zooming into one corner actually expands its speed trace instead of leaving it flat against the whole-lap range. A `Full · 900–1500 m` reset button appears in the bar.
+
+Switching between the distance and time axis clears the window, since a range in metres does not carry over to seconds. While zoomed, the map culls segments outside the viewport, so drawing gets cheaper the further you zoom in.
+
 ### Sector analysis (best stretches)
 
 With two or more recordings selected, the *Sectors* tab cuts the shared route into 10 m cells, times every lap through each cell and gives the cell to whoever was quickest. Consecutive cells owned by one lap form a **stretch** — that lap's best piece of driving.

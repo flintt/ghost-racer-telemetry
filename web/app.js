@@ -32,7 +32,13 @@ const state = {
   lang: 'en',
   theme: 'auto',
   summaryTab: 'metrics',
-  sectors: null
+  sectors: null,
+  // Zoom state: an X window over the charts, a scale+pan over the map. Both are
+  // view-only; nothing downstream of them recomputes lap data.
+  xRange: null,
+  mapView: { scale: 1, panX: 0, panY: 0 },
+  mapDrag: null,
+  chartDrag: null
 }
 
 /* ------------------------------------------------------------------ i18n */
@@ -68,6 +74,8 @@ const I18N = {
     colorSpeed: '速度', colorInputs: '油门/刹车', colorGear: '档位',
     colorLatG: '横向 G', colorDelta: 'Δt 对比', colorPerLap: '按记录配色', colorSector: '分段归属',
     tabMetrics: '汇总', tabSectors: '分段',
+    resetZoom: '1:1', resetRange: '全程 ·',
+    zoomHint: '滚轮缩放 · 拖动平移 · 双击还原',
     idealLap: (ideal, gap, coverage) =>
       `理论最佳 ${ideal} · 比最快圈快 ${gap} · 覆盖 ${coverage} m`,
     sectorsNeedTwo: '至少选两条记录才能做分段对比',
@@ -130,6 +138,8 @@ const I18N = {
     colorLatG: 'Lateral G', colorDelta: 'Δt vs reference', colorPerLap: 'Per recording',
     colorSector: 'Sector owner',
     tabMetrics: 'Summary', tabSectors: 'Sectors',
+    resetZoom: '1:1', resetRange: 'Full ·',
+    zoomHint: 'Wheel to zoom · drag to pan · double-click to reset',
     idealLap: (ideal, gap, coverage) =>
       `Ideal lap ${ideal} · ${gap} under the quickest · over ${coverage} m`,
     sectorsNeedTwo: 'Pick at least two recordings to compare sectors',
@@ -205,6 +215,8 @@ function applyStaticText() {
   for (const node of document.querySelectorAll('[data-i18n-placeholder]')) {
     node.placeholder = t(node.dataset.i18nPlaceholder)
   }
+  el('map').title = t('zoomHint')
+  updateZoomControls()
   fillSelect(el('sortMode'), [
     ['lapTime', t('sortLapTime')], ['rank', t('sortRank')],
     ['id', t('sortId')], ['duration', t('sortDuration')]
@@ -1322,6 +1334,21 @@ function axisValues(lap) {
   return state.axis === 'dist' ? lap.channels.dist : lap.channels.t
 }
 
+// axisWindow is the X range the charts currently show: the full extent unless
+// the reader has zoomed in.
+function axisWindow() {
+  const full = axisMax()
+  if (!state.xRange) return { from: 0, to: full, full }
+  const from = Math.max(0, Math.min(state.xRange.from, full))
+  const to = Math.min(full, Math.max(state.xRange.to, from + full / 1000))
+  return { from, to, full }
+}
+
+function isZoomed() {
+  const window = axisWindow()
+  return window.from > 0 || window.to < window.full
+}
+
 function axisMax() {
   let max = 0
   for (const entry of state.selected) {
@@ -1372,8 +1399,10 @@ function ensureLayer(holder, width, height, ratio, key, paint) {
   const context = buffer.getContext('2d')
   context.setTransform(ratio, 0, 0, ratio, 0, 0)
   context.clearRect(0, 0, width, height)
+  // Size first: the paint callback culls against the holder's dimensions.
+  Object.assign(holder, { canvas: buffer, width, height, ratio })
   paint(context)
-  Object.assign(holder, { canvas: buffer, key, width, height, ratio })
+  holder.key = key
   return buffer
 }
 
@@ -1441,6 +1470,8 @@ function colorForKey(key, entry) {
   return palette(state.colorMode === 'latg' || state.colorMode === 'delta' ? DIVERGING : SPEED_RAMP)[key]
 }
 
+// mapProjection fits every selected lap into the canvas, then applies the
+// reader's zoom and pan on top of that fit.
 function mapProjection(entries, width, height) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
   for (const entry of entries) {
@@ -1455,9 +1486,51 @@ function mapProjection(entries, width, height) {
   const offsetX = (width - spanX * scale) / 2
   const offsetY = (height - spanY * scale) / 2
   // BeamNG world Y grows north; canvas Y grows down.
+  const view = state.mapView
+  const centreX = width / 2
+  const centreY = height / 2
   return {
-    scale,
-    project: (x, y) => [offsetX + (x - minX) * scale, height - (offsetY + (y - minY) * scale)]
+    // The zoom handler pins a point under the pointer, so it has to use the very
+    // same dimensions this fit used: clientWidth is rounded, a bounding rect is
+    // not, and half of that difference shows up as drift on every wheel step.
+    width,
+    height,
+    scale: scale * view.scale,
+    project: (x, y) => {
+      const baseX = offsetX + (x - minX) * scale
+      const baseY = height - (offsetY + (y - minY) * scale)
+      return [
+        (baseX - centreX) * view.scale + centreX + view.panX,
+        (baseY - centreY) * view.scale + centreY + view.panY
+      ]
+    }
+  }
+}
+
+function resetMapView() {
+  state.mapView = { scale: 1, panX: 0, panY: 0 }
+  updateZoomControls()
+  scheduleRedraw()
+}
+
+function resetRange() {
+  state.xRange = null
+  updateZoomControls()
+  scheduleRedraw()
+}
+
+function updateZoomControls() {
+  const mapReset = el('mapReset')
+  mapReset.hidden = state.mapView.scale <= 1.001
+  const rangeReset = el('rangeReset')
+  const zoomed = isZoomed()
+  rangeReset.hidden = !zoomed
+  if (zoomed) {
+    const window = axisWindow()
+    const unit = state.axis === 'dist' ? 'm' : 's'
+    const digits = state.axis === 'dist' ? 0 : 2
+    rangeReset.textContent =
+      `${t('resetRange')} ${window.from.toFixed(digits)}–${window.to.toFixed(digits)} ${unit}`
   }
 }
 
@@ -1489,7 +1562,9 @@ function drawMap() {
     return
   }
 
+  const view = state.mapView
   const key = [width, height, state.colorMode, state.referenceKey, state.lang, effectiveTheme(),
+    view.scale.toFixed(3), view.panX.toFixed(1), view.panY.toFixed(1),
     state.sectors ? state.sectors.signature : '', selectionSignature()].join('~')
   const scales = colorScales()
   if (mapLayer.key !== key || mapLayer.width !== width || mapLayer.height !== height || mapLayer.ratio !== ratio) {
@@ -1514,8 +1589,18 @@ function drawMap() {
   renderLegend(scales)
 }
 
+// visibleAt keeps a point that is on screen or just outside it, so a segment
+// crossing the viewport is still drawn while the rest costs nothing.
+function visibleAt(points, index, width, height) {
+  const x = points[index * 2]
+  const y = points[index * 2 + 1]
+  return x > -60 && x < width + 60 && y > -60 && y < height + 60
+}
+
 function paintTrace(context, projected, scales, pass) {
   const { entry, points, total } = projected
+  const width = mapLayer.width
+  const height = mapLayer.height
   const reference = referenceLap()
   const isReference = reference && lapKey(reference) === lapKey(entry)
   const flat = state.colorMode === 'lap' ||
@@ -1541,9 +1626,20 @@ function paintTrace(context, projected, scales, pass) {
     context.moveTo(points[0], points[1])
     let lastX = points[0]
     let lastY = points[1]
+    let wasVisible = visibleAt(points, 0, width, height)
     for (let i = 1; i < total; i += 1) {
       const x = points[i * 2]
       const y = points[i * 2 + 1]
+      const visible = visibleAt(points, i, width, height)
+      if (!visible && !wasVisible) {
+        // Both ends off screen: lift the pen instead of drawing into the void.
+        context.moveTo(x, y)
+        lastX = x
+        lastY = y
+        wasVisible = visible
+        continue
+      }
+      wasVisible = visible
       // Sub-pixel steps are invisible but cost a line segment each.
       if (i < total - 1 && (x - lastX) ** 2 + (y - lastY) ** 2 < 0.8) continue
       context.lineTo(x, y)
@@ -1557,11 +1653,20 @@ function paintTrace(context, projected, scales, pass) {
   let runKey = pointColorKey(entry, 0, scales)
   let lastX = points[0]
   let lastY = points[1]
+  let wasVisible = visibleAt(points, 0, width, height)
   context.beginPath()
   context.moveTo(lastX, lastY)
   for (let i = 1; i < total; i += 1) {
     const x = points[i * 2]
     const y = points[i * 2 + 1]
+    const visible = visibleAt(points, i, width, height)
+    if (!visible && !wasVisible) {
+      context.moveTo(x, y)
+      lastX = x
+      lastY = y
+      continue
+    }
+    wasVisible = visible
     const key = pointColorKey(entry, i, scales)
     const far = (x - lastX) ** 2 + (y - lastY) ** 2 >= 0.8
     if (key === runKey) {
@@ -1749,19 +1854,20 @@ function buildCharts() {
     wrapper.append(canvas)
     container.append(wrapper)
     attachCursor(canvas)
+    attachChartZoom(canvas)
     return { definition, canvas, layer: { canvas: null, key: '', width: 0, height: 0, ratio: 0 } }
   })
 }
 
 function drawCharts() {
   const entries = loadedEntries()
-  const maxX = axisMax()
+  const window = axisWindow()
   for (let i = 0; i < state.charts.length; i += 1) {
-    drawChart(state.charts[i], entries, maxX, i === state.charts.length - 1)
+    drawChart(state.charts[i], entries, window, i === state.charts.length - 1)
   }
 }
 
-function drawChart(chart, entries, maxX, isLast) {
+function drawChart(chart, entries, window, isLast) {
   const { definition, canvas } = chart
   const { context, width, height, ratio } = fitCanvas(canvas, definition.height)
   context.clearRect(0, 0, width, height)
@@ -1770,10 +1876,10 @@ function drawChart(chart, entries, maxX, isLast) {
   const reference = definition.id === 'delta'
     ? `${state.referenceKey}|${state.sectors ? state.sectors.signature : ''}`
     : ''
-  const key = [definition.id, width, height, state.axis, maxX, isLast, reference,
+  const key = [definition.id, width, height, state.axis, window.from, window.to, isLast, reference,
     state.lang, effectiveTheme(), selectionSignature()].join('~')
   if (chart.layer.key !== key || chart.layer.width !== width || chart.layer.height !== height) {
-    prepareChart(chart, entries, maxX, isLast, width, height)
+    prepareChart(chart, entries, window, isLast, width, height)
   }
   const buffer = ensureLayer(chart.layer, width, height, ratio, key, (target) => paintChart(target, chart, isLast))
   context.drawImage(buffer, 0, 0, width, height)
@@ -1782,7 +1888,7 @@ function drawChart(chart, entries, maxX, isLast) {
 
 // prepareChart resolves the series and the value domain once, so a cursor move
 // never walks the samples again.
-function prepareChart(chart, entries, maxX, isLast, width, height) {
+function prepareChart(chart, entries, window, isLast, width, height) {
   const { definition } = chart
   const left = 46
   const right = 8
@@ -1801,8 +1907,13 @@ function prepareChart(chart, entries, maxX, isLast, width, height) {
   let low = definition.domain ? definition.domain[0] : Infinity
   let high = definition.domain ? definition.domain[1] : -Infinity
   if (!definition.domain) {
+    // Only what is on screen sets the scale, so zooming into a corner actually
+    // magnifies it instead of leaving it flat against a whole-lap range.
     for (const item of series) {
-      for (const value of item.values) {
+      const axis = axisValues(item.entry.lap)
+      for (let i = 0; i < item.values.length; i += 1) {
+        if (axis[i] < window.from || axis[i] > window.to) continue
+        const value = item.values[i]
         if (!isFinite(value)) continue
         if (value < low) low = value
         if (value > high) high = value
@@ -1819,17 +1930,19 @@ function prepareChart(chart, entries, maxX, isLast, width, height) {
     high += pad
   }
 
+  const span = window.to - window.from || 1
   chart.series = series
   chart.geometry = {
-    left, top, plotWidth, plotHeight, maxX, low, high,
-    xAt: (value) => left + (value / maxX) * plotWidth,
+    left, top, plotWidth, plotHeight, low, high,
+    from: window.from, to: window.to, span,
+    xAt: (value) => left + ((value - window.from) / span) * plotWidth,
     yAt: (value) => top + plotHeight - ((value - low) / (high - low || 1)) * plotHeight
   }
 }
 
 function paintChart(context, chart, isLast) {
   const { definition, series, geometry } = chart
-  const { left, top, plotWidth, plotHeight, maxX, low, high } = geometry
+  const { left, top, plotWidth, plotHeight, from, span, low, high } = geometry
 
   context.strokeStyle = themeColor('--chart-grid')
   context.lineWidth = 1
@@ -1867,8 +1980,10 @@ function paintChart(context, chart, isLast) {
   if (isLast) {
     context.textAlign = 'center'
     for (let i = 0; i <= 6; i += 1) {
-      const value = (maxX * i) / 6
-      const text = state.axis === 'dist' ? `${value.toFixed(0)}m` : `${value.toFixed(1)}s`
+      const value = from + (span * i) / 6
+      const text = state.axis === 'dist'
+        ? `${value.toFixed(0)}m`
+        : `${value.toFixed(span < 20 ? 2 : 1)}s`
       context.fillText(text, left + (plotWidth * i) / 6, top + plotHeight + 14)
     }
   }
@@ -1889,15 +2004,18 @@ function paintChart(context, chart, isLast) {
 function paintSectorStrip(context, chart) {
   const sectors = state.sectors
   if (!sectors || state.axis !== 'dist') return
-  const { left, top, plotWidth, maxX } = chart.geometry
+  const { left, top, plotWidth, xAt } = chart.geometry
   const entries = loadedEntries()
   for (let k = 0; k < sectors.cells; k += 1) {
     const index = sectors.owner[k]
     if (index < 0 || !entries[index]) continue
-    const from = left + ((k * sectors.step) / maxX) * plotWidth
-    const to = left + (((k + 1) * sectors.step) / maxX) * plotWidth
+    const from = xAt(k * sectors.step)
+    const to = xAt((k + 1) * sectors.step)
+    if (to < left || from > left + plotWidth) continue
+    const start = Math.max(left, from)
+    const end = Math.min(left + plotWidth, to)
     context.fillStyle = entries[index].color
-    context.fillRect(from, top - 6, Math.max(1, to - from), 4)
+    context.fillRect(start, top - 6, Math.max(1, end - start), 4)
   }
 }
 
@@ -1906,7 +2024,7 @@ function paintSectorStrip(context, chart) {
 // visible, which plain stride sampling drops.
 function paintSeries(context, item, chart) {
   const { definition, geometry } = chart
-  const { left, plotWidth, maxX, xAt, yAt } = geometry
+  const { left, plotWidth, from, span, xAt, yAt } = geometry
   const axis = axisValues(item.entry.lap)
   const total = Math.min(axis.length, item.values.length)
   context.strokeStyle = item.color
@@ -1920,9 +2038,10 @@ function paintSeries(context, item, chart) {
     for (let i = 0; i < total; i += 1) {
       const value = item.values[i]
       if (!isFinite(value)) continue
-      let column = Math.floor((axis[i] / maxX) * columns)
-      if (column < 0) column = 0
-      else if (column >= columns) column = columns - 1
+      const column = Math.floor(((axis[i] - from) / span) * columns)
+      // Samples outside the window are off screen; they must not squeeze into
+      // the edge columns and bend the first and last segment.
+      if (column < 0 || column >= columns) continue
       if (value < minima[column]) minima[column] = value
       if (value > maxima[column]) maxima[column] = value
     }
@@ -1950,6 +2069,7 @@ function paintSeries(context, item, chart) {
   for (let i = 0; i < total; i += stride) {
     const value = item.values[i]
     if (!isFinite(value)) continue
+    if (axis[i] < from - span || axis[i] > from + span * 2) continue
     const x = xAt(axis[i])
     const y = yAt(value)
     if (previousY == null) {
@@ -1969,8 +2089,8 @@ function paintSeries(context, item, chart) {
 function drawChartCursor(context, chart) {
   const { geometry, series } = chart
   if (!geometry || state.cursorX == null) return
-  const { left, top, plotWidth, plotHeight, maxX, xAt, yAt } = geometry
-  if (state.cursorX < 0 || state.cursorX > maxX) return
+  const { left, top, plotWidth, plotHeight, from, span, xAt, yAt } = geometry
+  if (state.cursorX < from || state.cursorX > from + span) return
 
   const x = Math.round(xAt(state.cursorX)) + 0.5
   context.strokeStyle = themeColor('--chart-cursor')
@@ -2004,12 +2124,13 @@ function formatAxisValue(value) {
 
 function attachCursor(canvas) {
   canvas.addEventListener('mousemove', (event) => {
+    if (state.chartDrag) return
     const chart = state.charts.find((item) => item.canvas === canvas)
     if (!chart || !chart.geometry) return
     const rect = canvas.getBoundingClientRect()
-    const { left, plotWidth, maxX } = chart.geometry
+    const { left, plotWidth, from, span } = chart.geometry
     const ratio = (event.clientX - rect.left - left) / plotWidth
-    setCursor(Math.max(0, Math.min(maxX, ratio * maxX)))
+    setCursor(Math.max(from, Math.min(from + span, from + ratio * span)))
   })
   canvas.addEventListener('mouseleave', () => setCursor(null))
 }
@@ -2017,7 +2138,7 @@ function attachCursor(canvas) {
 function attachMapCursor() {
   const canvas = el('map')
   canvas.addEventListener('mousemove', (event) => {
-    if (!state.mapProjected) return
+    if (!state.mapProjected || state.mapDrag) return
     const rect = canvas.getBoundingClientRect()
     const pointerX = event.clientX - rect.left
     const pointerY = event.clientY - rect.top
@@ -2049,6 +2170,116 @@ function attachMapCursor() {
     setCursor(axisValues(best.entry.lap)[best.index])
   })
   canvas.addEventListener('mouseleave', () => setCursor(null))
+}
+
+/* ------------------------------------------------------------------ zoom */
+
+function clamp(value, low, high) {
+  return value < low ? low : value > high ? high : value
+}
+
+// attachMapZoom: wheel zooms about the pointer, drag pans, double-click resets.
+function attachMapZoom() {
+  const canvas = el('map')
+  canvas.addEventListener('wheel', (event) => {
+    event.preventDefault()
+    const rect = canvas.getBoundingClientRect()
+    const pointerX = event.clientX - rect.left
+    const pointerY = event.clientY - rect.top
+    const view = state.mapView
+    const next = clamp(view.scale * Math.exp(-event.deltaY * 0.0015), 1, 40)
+    const projection = state.mapProjection
+    const centreX = (projection ? projection.width : rect.width) / 2
+    const centreY = (projection ? projection.height : rect.height) / 2
+    // Keep the world point under the pointer pinned to the pointer.
+    const baseX = (pointerX - centreX - view.panX) / view.scale + centreX
+    const baseY = (pointerY - centreY - view.panY) / view.scale + centreY
+    view.panX = pointerX - centreX - (baseX - centreX) * next
+    view.panY = pointerY - centreY - (baseY - centreY) * next
+    view.scale = next
+    if (next <= 1.001) {
+      view.scale = 1
+      view.panX = 0
+      view.panY = 0
+    }
+    updateZoomControls()
+    scheduleRedraw()
+  }, { passive: false })
+
+  canvas.addEventListener('mousedown', (event) => {
+    if (event.button !== 0 || state.mapView.scale <= 1.001) return
+    event.preventDefault()
+    state.mapDrag = {
+      x: event.clientX,
+      y: event.clientY,
+      panX: state.mapView.panX,
+      panY: state.mapView.panY
+    }
+    canvas.classList.add('grabbing')
+  })
+  canvas.addEventListener('dblclick', resetMapView)
+  el('mapReset').addEventListener('click', resetMapView)
+}
+
+// attachChartZoom: the charts share one X window, so zooming any of them zooms
+// all of them and the readout stays aligned with the map cursor.
+function attachChartZoom(canvas) {
+  canvas.addEventListener('wheel', (event) => {
+    const chart = state.charts.find((item) => item.canvas === canvas)
+    if (!chart || !chart.geometry) return
+    event.preventDefault()
+    const rect = canvas.getBoundingClientRect()
+    const { left, plotWidth, from, span } = chart.geometry
+    const ratio = clamp((event.clientX - rect.left - left) / plotWidth, 0, 1)
+    const anchor = from + ratio * span
+    const full = axisMax()
+    const nextSpan = clamp(span * Math.exp(event.deltaY * 0.0015), full / 500, full)
+    const nextFrom = clamp(anchor - ratio * nextSpan, 0, full - nextSpan)
+    state.xRange = nextSpan >= full ? null : { from: nextFrom, to: nextFrom + nextSpan }
+    updateZoomControls()
+    scheduleRedraw()
+  }, { passive: false })
+
+  canvas.addEventListener('mousedown', (event) => {
+    if (event.button !== 0 || !isZoomed()) return
+    const chart = state.charts.find((item) => item.canvas === canvas)
+    if (!chart || !chart.geometry) return
+    event.preventDefault()
+    state.chartDrag = {
+      x: event.clientX,
+      span: chart.geometry.span,
+      plotWidth: chart.geometry.plotWidth,
+      from: chart.geometry.from
+    }
+  })
+  canvas.addEventListener('dblclick', resetRange)
+}
+
+// One document-level pair of handlers drives both drags: a gesture that starts
+// on a canvas must keep working after the pointer leaves it.
+function attachDragging() {
+  document.addEventListener('mousemove', (event) => {
+    if (state.mapDrag) {
+      state.mapView.panX = state.mapDrag.panX + (event.clientX - state.mapDrag.x)
+      state.mapView.panY = state.mapDrag.panY + (event.clientY - state.mapDrag.y)
+      scheduleRedraw()
+      return
+    }
+    if (state.chartDrag) {
+      const drag = state.chartDrag
+      const full = axisMax()
+      const moved = ((event.clientX - drag.x) / drag.plotWidth) * drag.span
+      const from = clamp(drag.from - moved, 0, full - drag.span)
+      state.xRange = { from, to: from + drag.span }
+      updateZoomControls()
+      scheduleRedraw()
+    }
+  })
+  document.addEventListener('mouseup', () => {
+    state.mapDrag = null
+    state.chartDrag = null
+    el('map').classList.remove('grabbing')
+  })
 }
 
 function setCursor(value) {
@@ -2245,7 +2476,10 @@ function wire() {
     if (!chip) return
     state.axis = chip.dataset.axis
     for (const node of el('axisMode').children) node.classList.toggle('active', node === chip)
+    // The window is in the old axis's units; metres do not carry over to seconds.
+    state.xRange = null
     state.cursorX = null
+    updateZoomControls()
     scheduleRedraw()
   })
 
@@ -2272,6 +2506,9 @@ function wire() {
   })
 
   attachMapCursor()
+  attachMapZoom()
+  attachDragging()
+  el('rangeReset').addEventListener('click', resetRange)
   window.addEventListener('resize', scheduleRedraw)
 }
 

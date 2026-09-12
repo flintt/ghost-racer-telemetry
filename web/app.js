@@ -51,6 +51,7 @@ const state = {
   // 'north' keeps the world upright; 'heading' turns the map so the direction of
   // travel points up, the way a phone navigates.
   mapOrientation: 'north',
+  mapTilt: false,
   mapHeading: 0,
   playback: { playing: false, speed: 1, loop: true, time: 0, handle: null }
 }
@@ -94,6 +95,7 @@ const I18N = {
     pinHint: '点击锁定游标 · 锁定后移到另一侧不会丢位置',
     selectHint: '右键或 Ctrl 拖动框选一段',
     orientHeading: '切换为行进方向朝上', orientNorth: '切换为正北朝上',
+    tiltOn: '倾斜视角（3D）', tiltOff: '取消倾斜，回到俯视',
     play: '播放所选区间', pause: '暂停', loop: '循环',
     selectionNone: '未选区间（播放整圈）',
     zoomHint: '滚轮缩放 · 拖动平移 · 双击还原',
@@ -167,6 +169,7 @@ const I18N = {
     pinHint: 'Click to pin the cursor · a pinned position survives moving to the other pane',
     selectHint: 'Right-drag or Ctrl-drag to select a stretch',
     orientHeading: 'Turn the map heading-up', orientNorth: 'Turn the map north-up',
+    tiltOn: 'Tilt the view (3D)', tiltOff: 'Drop the tilt, look straight down',
     play: 'Play the selected stretch', pause: 'Pause', loop: 'Loop',
     selectionNone: 'No selection (plays the whole lap)',
     zoomHint: 'Wheel to zoom · drag to pan · double-click to reset',
@@ -209,6 +212,7 @@ const LANG_STORAGE = 'ghostRacerWeb.lang'
 const THEME_STORAGE = 'ghostRacerWeb.theme'
 const PANEL_STORAGE = 'ghostRacerWeb.panels'
 const ORIENTATION_STORAGE = 'ghostRacerWeb.mapOrientation'
+const TILT_STORAGE = 'ghostRacerWeb.mapTilt'
 
 function t(key, ...args) {
   const table = I18N[state.lang] || I18N.en
@@ -1618,9 +1622,20 @@ function colorForKey(key, entry) {
 
 // mapProjection fits every selected lap into the canvas, then applies the
 // reader's zoom and pan on top of that fit.
-// The anchor sits below the middle, the way a navigation view leaves room for
-// the road ahead.
-const HEADING_ANCHOR_Y = 0.62
+// Where the car sits in a heading-up view: low and centred, the way a phone
+// navigates, so almost the whole frame is the road ahead. Not flat against the
+// bottom — a little of the corner just taken is worth seeing.
+const HEADING_ANCHOR_Y = 0.78
+// Tilt: a real perspective divide over the ground plane, not a fake squash.
+// TILT is the camera pitch away from straight down; CAMERA sets how strong the
+// convergence is, as a multiple of the viewport height. Together they put the
+// horizon just inside the top of the frame.
+const TILT_ANGLE = 55 * Math.PI / 180
+const TILT_CAMERA = 0.9
+// Ground behind the camera cannot be drawn; those points are pushed far off
+// screen so the existing viewport culling lifts the pen over them.
+const TILT_MIN_DEPTH = 0.15
+const OFF_SCREEN = 1e6
 // Half-length of the chord the heading is taken from, in metres.
 const HEADING_WINDOW = 12
 const HEADING_WINDOW_MAX = 40
@@ -1704,19 +1719,35 @@ function mapProjection(entries, width, height) {
     const sin = Math.sin(theta)
     const originX = width / 2
     const originY = height * HEADING_ANCHOR_Y
+    const tilted = state.mapTilt
+    const camera = TILT_CAMERA * height
+    const tiltSin = Math.sin(TILT_ANGLE)
+    const tiltCos = Math.cos(TILT_ANGLE)
+
     return {
       width,
       height,
       scale: total,
       headingUp: true,
+      tilted,
       centreX: originX,
       centreY: originY,
       project: (x, y) => {
         const dx = x - anchor.x
         const dy = y - anchor.y
+        // Into car space: lateral to the right, forward up the screen.
+        const lateral = (dx * cos - dy * sin) * total
+        const forward = (dx * sin + dy * cos) * total
+        if (!tilted) {
+          return [originX + view.panX + lateral, originY + view.panY - forward]
+        }
+        // Perspective divide: ground far ahead converges toward the horizon and
+        // narrows, ground behind the camera is dropped.
+        const depth = 1 + (forward * tiltSin) / camera
+        if (depth < TILT_MIN_DEPTH) return [OFF_SCREEN, OFF_SCREEN]
         return [
-          originX + view.panX + (dx * cos - dy * sin) * total,
-          originY + view.panY - (dx * sin + dy * cos) * total
+          originX + view.panX + lateral / depth,
+          originY + view.panY - (forward * tiltCos) / depth
         ]
       }
     }
@@ -1748,8 +1779,16 @@ function mapProjection(entries, width, height) {
 function setMapOrientation(mode) {
   state.mapOrientation = mode
   writeSetting(ORIENTATION_STORAGE, mode)
+  // Any pan carried over from north-up would offset the anchor.
   state.mapView.panX = 0
   state.mapView.panY = 0
+  updateZoomControls()
+  scheduleRedraw()
+}
+
+function setMapTilt(on) {
+  state.mapTilt = on
+  writeSetting(TILT_STORAGE, on ? '1' : '0')
   updateZoomControls()
   scheduleRedraw()
 }
@@ -1772,6 +1811,12 @@ function updateZoomControls() {
   orient.textContent = headingUp ? '▲' : 'N'
   orient.classList.toggle('active', headingUp)
   orient.title = headingUp ? t('orientNorth') : t('orientHeading')
+
+  // Tilt only means anything once the map is facing the way the car is going.
+  const tilt = el('mapTilt')
+  tilt.hidden = !headingUp
+  tilt.classList.toggle('active', state.mapTilt)
+  tilt.title = state.mapTilt ? t('tiltOff') : t('tiltOn')
 
   const mapReset = el('mapReset')
   mapReset.hidden = state.mapView.scale <= 1.001
@@ -1821,7 +1866,7 @@ function drawMap() {
   // last digit from forcing a repaint that changes nothing visible.
   const anchor = state.mapOrientation === 'heading' ? mapAnchor() : null
   const orientationKey = anchor
-    ? `h${anchor.heading.toFixed(3)}:${anchor.x.toFixed(1)}:${anchor.y.toFixed(1)}`
+    ? `h${anchor.heading.toFixed(3)}:${anchor.x.toFixed(1)}:${anchor.y.toFixed(1)}:${state.mapTilt ? 't' : 'f'}`
     : 'n'
   const key = [width, height, state.colorMode, state.referenceKey, state.lang, effectiveTheme(),
     view.scale.toFixed(3), view.panX.toFixed(1), view.panY.toFixed(1), orientationKey,
@@ -2747,12 +2792,62 @@ function sectorRunToSelection(run) {
   }
 }
 
+// fitMapToSelection frames the selected stretch: a row clicked in the sector
+// table carries no spatial context, so the map has to go there itself.
+function fitMapToSelection() {
+  const projection = state.mapProjection
+  if (!state.selection || !projection || !state.mapProjected) return
+
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const { entry } of state.mapProjected) {
+    const channels = entry.lap.channels
+    const values = state.axis === 'dist' && entry.stations ? entry.stations : axisValues(entry.lap)
+    for (let i = 0; i < values.length; i += 1) {
+      if (values[i] < state.selection.from || values[i] > state.selection.to) continue
+      minX = Math.min(minX, channels.x[i])
+      maxX = Math.max(maxX, channels.x[i])
+      minY = Math.min(minY, channels.y[i])
+      maxY = Math.max(maxY, channels.y[i])
+    }
+  }
+  if (!isFinite(minX)) return
+
+  // Leave a quarter of the frame around the stretch so its exits stay visible.
+  const usableWidth = projection.width * 0.75
+  const usableHeight = projection.height * 0.75
+  const desired = Math.min(
+    usableWidth / Math.max(1, maxX - minX),
+    usableHeight / Math.max(1, maxY - minY)
+  )
+  const view = state.mapView
+  view.scale = clamp(view.scale * (desired / projection.scale), 1, 40)
+
+  // Heading up anchors on the car, so only the scale applies there.
+  if (state.mapOrientation === 'heading') {
+    scheduleRedraw()
+    return
+  }
+  // Rebuild at the new scale, then slide the stretch's centre to the middle.
+  view.panX = 0
+  view.panY = 0
+  drawMap()
+  const centre = state.mapProjection.project((minX + maxX) / 2, (minY + maxY) / 2)
+  view.panX += state.mapProjection.width / 2 - centre[0]
+  view.panY += state.mapProjection.height / 2 - centre[1]
+  updateZoomControls()
+  scheduleRedraw()
+}
+
 function selectSectorRun(run, play) {
   const range = sectorRunToSelection(run)
   if (!range) return
   setSelection(range.from, range.to)
   state.selectedRunKey = `${run.entry.id}:${run.from}:${run.to}`
   renderSummary()
+  fitMapToSelection()
   if (play) {
     state.playback.time = axisToTime(range.from)
     startPlayback()
@@ -2865,6 +2960,14 @@ function attachMapZoom() {
     const view = state.mapView
     const next = clamp(view.scale * Math.exp(-event.deltaY * 0.0015), 1, 40)
     const projection = state.mapProjection
+    if (projection && projection.headingUp) {
+      // Zoom around the car, which stays put: panning to the pointer would slide
+      // it off its mark and the view would stop reading as navigation.
+      view.scale = next
+      updateZoomControls()
+      scheduleRedraw()
+      return
+    }
     const centreX = projection ? projection.centreX : rect.width / 2
     const centreY = projection ? projection.centreY : rect.height / 2
     // Keep the world point under the pointer pinned to the pointer.
@@ -2898,7 +3001,10 @@ function attachMapZoom() {
       scheduleRedraw()
       return
     }
-    if (event.button !== 0 || state.mapView.scale <= 1.001) return
+    // Heading up, the map is anchored to the car; dragging it would only move
+    // the car off the spot the mode exists to keep it on.
+    if (event.button !== 0 || state.mapView.scale <= 1.001 ||
+      (state.mapProjection && state.mapProjection.headingUp)) return
     event.preventDefault()
     state.mapDrag = {
       x: event.clientX,
@@ -2912,6 +3018,7 @@ function attachMapZoom() {
   el('mapReset').addEventListener('click', resetMapView)
   el('mapOrient').addEventListener('click', () =>
     setMapOrientation(state.mapOrientation === 'heading' ? 'north' : 'heading'))
+  el('mapTilt').addEventListener('click', () => setMapTilt(!state.mapTilt))
 }
 
 // attachChartZoom: the charts share one X window, so zooming any of them zooms
@@ -3278,6 +3385,7 @@ function wire() {
   state.collapsed = loadTreeState()
   state.panels = loadPanels()
   state.mapOrientation = readSetting(ORIENTATION_STORAGE, 'north') === 'heading' ? 'heading' : 'north'
+  state.mapTilt = readSetting(TILT_STORAGE, '0') === '1'
   state.lang = detectLanguage()
   state.theme = readSetting(THEME_STORAGE, 'auto')
   applyTheme()

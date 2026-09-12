@@ -75,7 +75,9 @@ The **bottom-right of the map** carries in-game style vertical gauges: one clust
 
 **The recording list above and the summary/sectors panel below both collapse** (the caret in their headers), handing all of the room to the map and the charts. The state is remembered in the browser.
 
-**The map can face the direction of travel** (`N` / `▲` in its corner), the way a phone navigates: the current point sits low in the view, the road ahead points up, and the map turns. The choice is remembered.
+**The map can face the direction of travel** (`N` / `▲` in its corner), the way a phone navigates: the current point is pinned **horizontally centred, 78% of the way down** — nearly the whole frame is the road ahead, with just enough behind to still see the corner just taken. In this mode the wheel zooms **around the car** and dragging is disabled, so it never slides off that spot.
+
+`3D` then **tilts the view**: a real perspective divide at a 55° camera pitch, so the road ahead converges toward the horizon and narrows rather than the picture being squashed. Ground behind the camera is culled. Both choices are remembered.
 
 The heading comes from the **tangent of the path, never from the car's own facing** — that is what keeps it steady. Mid-drift the car is sideways and the driver is sawing at the wheel, but the direction of travel is smooth. The tangent is taken over a window measured in **metres** (12 m either side, widened to 40 m when that degenerates), so crawling, stopping or spinning on the spot cannot turn the angle into noise; if it degenerates anyway the previous heading is held while the position keeps tracking.
 
@@ -97,7 +99,7 @@ Switching between the distance and time axis clears the window, since a range in
 With two or more recordings selected, the *Sectors* tab cuts the shared route into 10 m cells, times every lap through each cell and gives the cell to whoever was quickest. Consecutive cells owned by one lap form a **stretch** — that lap's best piece of driving.
 
 - **Ideal lap**: the sum of the quickest time in every cell. Its gap to the actual quickest lap is how much is left on the table with the driving already on record.
-- **Sector table**: `range / quickest / rate / peak / total lead / vs reference`, **sorted by rate** — the top row is the corner worth practising. Hovering previews it; **clicking the row makes that stretch the selection** (thickened on the map, shaded on the charts), and the ▶ at the end of the row selects it and plays it back. Finding where the time went and watching it happen are the same gesture.
+- **Sector table**: `range / quickest / rate / peak / total lead / vs reference`, **sorted by rate** — the top row is the corner worth practising. Hovering previews it; **clicking the row makes that stretch the selection** (thickened on the map, shaded on the charts) and **frames it on the map**, centred and zoomed to fill about 75% of the view so its entry and exit stay visible; the ▶ at the end of the row selects it and plays it back. Finding where the time went and watching it happen are the same gesture.
 - **Trace colour → Sector owner**: each lap keeps its colour where it owns the cell and goes grey elsewhere. The Δt chart carries the same ownership strip along its top edge.
 
 Three decisions worth knowing about:

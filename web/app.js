@@ -98,6 +98,7 @@ const I18N = {
     sectorsNone: '没有足够显著的分段差异',
     sectorRange: '区间 (m)', sectorOwner: '最快', sectorTime: '段用时 (s)',
     sectorGain: '领先次快 (s)', sectorVsRef: '相对参照圈 (s)',
+    sectorPlay: '选中这一段并播放',
     lapListEmptyFiltered: '当前筛选下没有记录',
     lapListEmpty: '这个库里还没有记录',
     exportCsvTitle: '导出 CSV', deleteTitle: '删除这条记录',
@@ -168,6 +169,7 @@ const I18N = {
     sectorsNone: 'No sector difference worth reporting',
     sectorRange: 'Range (m)', sectorOwner: 'Quickest', sectorTime: 'Sector time (s)',
     sectorGain: 'Lead over next (s)', sectorVsRef: 'Vs reference (s)',
+    sectorPlay: 'Select this stretch and play it',
     lapListEmptyFiltered: 'No recording matches this filter',
     lapListEmpty: 'This library has no recordings yet',
     exportCsvTitle: 'Export CSV', deleteTitle: 'Delete this recording',
@@ -1266,12 +1268,14 @@ function renderSectorTable(container) {
   }
 
   const table = document.createElement('table')
+  table.className = 'sector-table'
   const head = table.createTHead().insertRow()
   for (const key of ['sectorRange', 'sectorOwner', 'sectorTime', 'sectorGain', 'sectorVsRef']) {
     const cell = document.createElement('th')
     cell.textContent = t(key)
     head.append(cell)
   }
+  head.append(document.createElement('th'))
 
   const body = table.createTBody()
   const reference = referenceLap()
@@ -1308,13 +1312,22 @@ function renderSectorTable(container) {
       if (!anchor || !anchor.stations) return null
       return interpolate(anchor.stations, anchor.lap.channels.t, middle)
     }
+    const actions = row.insertCell()
+    actions.className = 'row-actions'
+    actions.append(iconButton('▶', t('sectorPlay'), () => selectSectorRun(run, true)))
+
+    if (state.selectedRunKey === `${run.entry.id}:${run.from}:${run.to}`) {
+      row.classList.add('selected')
+    }
     row.addEventListener('mouseenter', () => {
       const value = stretchValue()
       if (value != null) setCursor(value, { source: 'table' })
     })
-    row.addEventListener('click', () => {
-      const value = stretchValue()
-      if (value != null) setCursor(value, { source: 'table', pin: true })
+    // Clicking a stretch makes it the selection, so it highlights on the map and
+    // the transport can replay exactly that piece.
+    row.addEventListener('click', (event) => {
+      if (event.target.tagName === 'BUTTON') return
+      selectSectorRun(run, false)
     })
   }
   container.append(table)
@@ -1858,7 +1871,12 @@ function drawSelectionOnMap(context) {
   if (!state.selection || !state.mapProjected) return
   const scales = colorScales()
   for (const projected of state.mapProjected) {
-    const values = axisValues(projected.entry.lap)
+    // Sector stretches are measured along the reference path, so highlight by
+    // station where it is known: a lap on a wider line would otherwise have its
+    // stretch shifted by the few metres its own odometer runs ahead.
+    const values = state.axis === 'dist' && projected.entry.stations
+      ? projected.entry.stations
+      : axisValues(projected.entry.lap)
     let first = -1
     let last = -1
     for (let i = 0; i < projected.total; i += 1) {
@@ -2541,6 +2559,7 @@ function setSelection(from, to) {
 
 function clearSelection() {
   state.selection = null
+  state.selectedRunKey = null
   stopPlayback()
   updatePlaybackControls()
   scheduleRedraw()
@@ -2566,6 +2585,32 @@ function selectionOnMap(box) {
   }
   if (!isFinite(low)) return
   setSelection(low, high)
+}
+
+// sectorRunToSelection converts a stretch (metres along the reference path)
+// into the units the selection and the cursor are expressed in.
+function sectorRunToSelection(run) {
+  if (state.axis === 'dist') return { from: run.from, to: run.to }
+  const reference = referenceLap()
+  const anchor = reference && reference.stations ? reference : run.entry
+  if (!anchor || !anchor.stations) return null
+  return {
+    from: interpolate(anchor.stations, anchor.lap.channels.t, run.from),
+    to: interpolate(anchor.stations, anchor.lap.channels.t, run.to)
+  }
+}
+
+function selectSectorRun(run, play) {
+  const range = sectorRunToSelection(run)
+  if (!range) return
+  setSelection(range.from, range.to)
+  state.selectedRunKey = `${run.entry.id}:${run.from}:${run.to}`
+  renderSummary()
+  if (play) {
+    state.playback.time = axisToTime(range.from)
+    startPlayback()
+    updatePlaybackControls()
+  }
 }
 
 function playbackBounds() {

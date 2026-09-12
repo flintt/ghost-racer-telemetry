@@ -326,6 +326,10 @@ input[type="search"]:focus, .select:focus { outline: 1px solid var(--accent); bo
 .summary-head .muted { font-family: var(--mono); font-size: 11px; }
 .sector-owner { display: inline-flex; align-items: center; gap: 6px; }
 .summary td.gain { color: var(--good); }
+/* Only the sector rows are actionable; the metrics table is a readout. */
+.summary .sector-table tbody tr { cursor: pointer; }
+.summary .sector-table tbody tr:hover td { background: var(--bg-raised); }
+.summary .sector-table tbody tr.selected td { background: var(--accent-soft); }
 
 .summary { flex: none; max-height: 26%; overflow: auto; }
 .summary[hidden] { display: none; }

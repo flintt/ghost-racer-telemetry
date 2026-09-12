@@ -84,7 +84,7 @@ Switching between the distance and time axis clears the window, since a range in
 With two or more recordings selected, the *Sectors* tab cuts the shared route into 10 m cells, times every lap through each cell and gives the cell to whoever was quickest. Consecutive cells owned by one lap form a **stretch** — that lap's best piece of driving.
 
 - **Ideal lap**: the sum of the quickest time in every cell. Its gap to the actual quickest lap is how much is left on the table with the driving already on record.
-- **Sector table**: `range / quickest / sector time / lead over next / vs reference`, sorted by lead — the top row is the corner worth practising. Hovering a row parks the cursor in the middle of that stretch on the map and every chart.
+- **Sector table**: `range / quickest / sector time / lead over next / vs reference`, sorted by lead — the top row is the corner worth practising. Hovering previews it; **clicking the row makes that stretch the selection** (thickened on the map, shaded on the charts), and the ▶ at the end of the row selects it and plays it back. Finding where the time went and watching it happen are the same gesture.
 - **Trace colour → Sector owner**: each lap keeps its colour where it owns the cell and goes grey elsewhere. The Δt chart carries the same ownership strip along its top edge.
 
 Three decisions worth knowing about:

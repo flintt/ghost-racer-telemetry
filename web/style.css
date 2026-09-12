@@ -276,6 +276,13 @@ input[type="search"]:focus, .select:focus { outline: 1px solid var(--accent); bo
 }
 .map-reset[hidden] { display: none; }
 #rangeReset { font-family: var(--mono); font-size: 11px; padding: 4px 8px; }
+.playback { display: inline-flex; align-items: center; gap: 4px; }
+.playback .btn { padding: 3px 8px; font-size: 12px; line-height: 1.2; }
+.playback .loop.active { color: var(--accent); border-color: var(--accent); }
+.playback .speed { min-width: 62px; padding: 3px 6px; font-size: 11px; }
+.playback #selectionLabel { font-family: var(--mono); font-size: 11px; padding-left: 2px; }
+.playback #selectionLabel.has-selection { color: var(--accent); }
+.playback #clearSelection[hidden] { display: none; }
 #rangeReset[hidden] { display: none; }
 .legend {
   position: absolute; left: 12px; bottom: 12px;

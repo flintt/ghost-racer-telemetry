@@ -70,6 +70,19 @@
           </div>
         </label>
         <button id="rangeReset" class="btn" hidden></button>
+        <div id="playbackBar" class="playback" hidden>
+          <button id="playToggle" class="btn play">▶</button>
+          <button id="loopToggle" class="btn loop">⟲</button>
+          <select id="playSpeed" class="select speed">
+            <option value="0.25">0.25×</option>
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+          </select>
+          <span id="selectionLabel" class="muted"></span>
+          <button id="clearSelection" class="btn" hidden>✕</button>
+        </div>
         <label class="inline"><span class="muted" data-i18n="colorLabel">轨迹着色</span>
           <select id="colorMode" class="select"></select>
         </label>

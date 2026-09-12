@@ -43,7 +43,12 @@ const state = {
   xRange: null,
   mapView: { scale: 1, panX: 0, panY: 0 },
   mapDrag: null,
-  chartDrag: null
+  chartDrag: null,
+  // A selected stretch, in the units of the current axis, plus the in-progress
+  // gesture that is drawing it.
+  selection: null,
+  selecting: null,
+  playback: { playing: false, speed: 1, loop: true, time: 0, handle: null }
 }
 
 /* ------------------------------------------------------------------ i18n */
@@ -83,6 +88,9 @@ const I18N = {
     collapse: '折叠', expand: '展开',
     pinned: '已锁定', pinRelease: '释放（Esc）', pinCentre: '把地图移到锁定点',
     pinHint: '点击锁定游标 · 锁定后移到另一侧不会丢位置',
+    selectHint: '右键或 Ctrl 拖动框选一段',
+    play: '播放所选区间', pause: '暂停', loop: '循环',
+    selectionNone: '未选区间（播放整圈）',
     zoomHint: '滚轮缩放 · 拖动平移 · 双击还原',
     idealLap: (ideal, gap, coverage) =>
       `理论最佳 ${ideal} · 比最快圈快 ${gap} · 覆盖 ${coverage} m`,
@@ -150,6 +158,9 @@ const I18N = {
     collapse: 'Collapse', expand: 'Expand',
     pinned: 'Pinned', pinRelease: 'Release (Esc)', pinCentre: 'Bring the map to the pinned point',
     pinHint: 'Click to pin the cursor · a pinned position survives moving to the other pane',
+    selectHint: 'Right-drag or Ctrl-drag to select a stretch',
+    play: 'Play the selected stretch', pause: 'Pause', loop: 'Loop',
+    selectionNone: 'No selection (plays the whole lap)',
     zoomHint: 'Wheel to zoom · drag to pan · double-click to reset',
     idealLap: (ideal, gap, coverage) =>
       `Ideal lap ${ideal} · ${gap} under the quickest · over ${coverage} m`,
@@ -227,7 +238,7 @@ function applyStaticText() {
   for (const node of document.querySelectorAll('[data-i18n-placeholder]')) {
     node.placeholder = t(node.dataset.i18nPlaceholder)
   }
-  el('map').title = `${t('zoomHint')}\n${t('pinHint')}`
+  el('map').title = `${t('zoomHint')}\n${t('pinHint')}\n${t('selectHint')}`
   updateZoomControls()
   applyPanels()
   fillSelect(el('sortMode'), [
@@ -318,7 +329,8 @@ function themeColor(name) {
     themeColorCache = {}
     const styles = getComputedStyle(document.documentElement)
     for (const key of ['--chart-grid', '--chart-text', '--chart-zero', '--chart-cursor',
-      '--chart-cursor-pinned', '--chart-dot-ring', '--chart-reference-dim', '--trace-muted']) {
+      '--chart-cursor-pinned', '--chart-dot-ring', '--chart-reference-dim', '--trace-muted',
+      '--overlay', '--line', '--accent']) {
       themeColorCache[key] = styles.getPropertyValue(key).trim()
     }
   }
@@ -1673,7 +1685,10 @@ function drawMap() {
   })
 
   context.drawImage(buffer, 0, 0, width, height)
+  drawSelectionOnMap(context)
   drawMapCursor(context)
+  drawSelectionBox(context)
+  drawGauges(context, width, height)
   renderLegend(scales)
 }
 
@@ -1835,6 +1850,122 @@ function paintGate(context, projection, position, normal, halfWidth, color, labe
   context.fillText(label, bx + 4, by)
 }
 
+// drawSelectionOnMap thickens the stretch that is selected, so the box drawn
+// over a corner reads back as a piece of the racing line.
+function drawSelectionOnMap(context) {
+  if (!state.selection || !state.mapProjected) return
+  for (const { entry, points, total } of state.mapProjected) {
+    const values = axisValues(entry.lap)
+    context.strokeStyle = entry.color
+    context.lineWidth = 4
+    context.lineJoin = 'round'
+    context.lineCap = 'round'
+    context.beginPath()
+    let drawing = false
+    for (let i = 0; i < total; i += 1) {
+      if (values[i] < state.selection.from || values[i] > state.selection.to) {
+        drawing = false
+        continue
+      }
+      if (!drawing) {
+        context.moveTo(points[i * 2], points[i * 2 + 1])
+        drawing = true
+      } else {
+        context.lineTo(points[i * 2], points[i * 2 + 1])
+      }
+    }
+    context.stroke()
+  }
+}
+
+function drawSelectionBox(context) {
+  const gesture = state.selecting
+  if (!gesture || gesture.pane !== 'map') return
+  const left = Math.min(gesture.x0, gesture.x1)
+  const top = Math.min(gesture.y0, gesture.y1)
+  const width = Math.abs(gesture.x1 - gesture.x0)
+  const height = Math.abs(gesture.y1 - gesture.y0)
+  context.strokeStyle = themeColor('--accent')
+  context.lineWidth = 1
+  context.setLineDash([4, 3])
+  context.strokeRect(left + 0.5, top + 0.5, width, height)
+  context.setLineDash([])
+}
+
+const GAUGE_CHANNELS = [
+  { key: 'throttle', letter: 'T', color: '#3ddc97' },
+  { key: 'brake', letter: 'B', color: '#ff4d4d' },
+  { key: 'handbrake', letter: 'H', color: '#ffd23d' }
+]
+
+// drawGauges puts the in-game style vertical bars in the map's bottom-right
+// corner: one cluster per lap, throttle/brake/handbrake and the gear. The speed
+// legend keeps the bottom-left corner to itself.
+function drawGauges(context, width, height) {
+  if (state.cursorX == null || !state.mapProjected) return
+  const entries = loadedEntries().filter((entry) => entry.lap.hasInputs).slice(0, 4)
+  if (!entries.length) return
+
+  const barWidth = 7
+  const barGap = 4
+  const padding = 7
+  const barsHeight = 54
+  const clusterWidth = barWidth * GAUGE_CHANNELS.length + barGap * (GAUGE_CHANNELS.length - 1) + padding * 2
+  const boxHeight = barsHeight + 34
+  const boxWidth = clusterWidth * entries.length
+  const boxLeft = width - boxWidth - 12
+  const boxTop = height - boxHeight - 12
+  if (boxLeft < 8 || boxTop < 8) return
+
+  context.fillStyle = themeColor('--overlay')
+  context.strokeStyle = themeColor('--line')
+  context.lineWidth = 1
+  context.beginPath()
+  context.rect(boxLeft + 0.5, boxTop + 0.5, boxWidth, boxHeight)
+  context.fill()
+  context.stroke()
+
+  context.textAlign = 'center'
+  context.font = '9px ui-monospace, monospace'
+
+  entries.forEach((entry, column) => {
+    const channels = entry.lap.channels
+    const values = axisValues(entry.lap)
+    const index = indexAt(values, state.cursorX)
+    const ended = index < 0 || values[values.length - 1] < state.cursorX
+    const clusterLeft = boxLeft + column * clusterWidth + padding
+    const top = boxTop + 8
+
+    // The lap's colour identifies the cluster without spending a text row.
+    context.fillStyle = entry.color
+    context.fillRect(clusterLeft, boxTop + 4, clusterWidth - padding * 2, 2)
+
+    GAUGE_CHANNELS.forEach((channel, i) => {
+      const x = clusterLeft + i * (barWidth + barGap)
+      context.fillStyle = themeColor('--trace-muted')
+      context.fillRect(x, top, barWidth, barsHeight)
+      if (!ended) {
+        const value = clamp(channels[channel.key] ? channels[channel.key][index] : 0, 0, 1)
+        const filled = Math.round(barsHeight * value)
+        if (filled > 0) {
+          context.fillStyle = channel.color
+          context.fillRect(x, top + barsHeight - filled, barWidth, filled)
+        }
+      }
+      context.fillStyle = themeColor('--chart-text')
+      context.fillText(channel.letter, x + barWidth / 2, top + barsHeight + 10)
+    })
+
+    const gear = ended ? '—' : String(Math.round(channels.gear[index]))
+    // The gear takes the lap's colour, which is what ties it to its cluster.
+    context.fillStyle = ended ? themeColor('--chart-text') : entry.color
+    context.font = 'bold 12px ui-monospace, monospace'
+    context.fillText(gear, clusterLeft + (clusterWidth - padding * 2) / 2, top + barsHeight + 23)
+    context.font = '9px ui-monospace, monospace'
+  })
+  context.textAlign = 'left'
+}
+
 function drawMapCursor(context) {
   if (state.cursorX == null || !state.mapProjected) return
   for (const { entry, points } of state.mapProjected) {
@@ -1979,6 +2110,7 @@ function drawChart(chart, entries, window, isLast) {
   }
   const buffer = ensureLayer(chart.layer, width, height, ratio, key, (target) => paintChart(target, chart, isLast))
   context.drawImage(buffer, 0, 0, width, height)
+  drawChartSelection(context, chart)
   drawChartCursor(context, chart)
 }
 
@@ -2190,6 +2322,27 @@ function paintSeries(context, item, chart) {
   context.stroke()
 }
 
+// drawChartSelection shades the selected stretch. It runs whether or not a
+// cursor is set, and while the gesture is still being dragged.
+function drawChartSelection(context, chart) {
+  const { geometry } = chart
+  if (!geometry) return
+  const range = state.selecting && state.selecting.pane === 'chart'
+    ? {
+      from: Math.min(state.selecting.from, state.selecting.to),
+      to: Math.max(state.selecting.from, state.selecting.to)
+    }
+    : state.selection
+  if (!range) return
+  const { left, top, plotWidth, plotHeight, xAt } = geometry
+  const bandLeft = clamp(xAt(range.from), left, left + plotWidth)
+  const bandRight = clamp(xAt(range.to), left, left + plotWidth)
+  context.fillStyle = themeColor('--accent')
+  context.globalAlpha = 0.12
+  context.fillRect(bandLeft, top, Math.max(1, bandRight - bandLeft), plotHeight)
+  context.globalAlpha = 1
+}
+
 function drawChartCursor(context, chart) {
   const { geometry, series } = chart
   if (!geometry || state.cursorX == null) return
@@ -2247,7 +2400,7 @@ function attachCursor(canvas) {
     if (value != null) setCursor(value, { source: 'chart' })
   })
   canvas.addEventListener('mouseleave', () => {
-    if (!state.cursorPinned) setCursor(null, { source: 'chart' })
+    if (!cursorLocked()) setCursor(null, { source: 'chart' })
   })
   canvas.addEventListener('click', (event) => {
     // A click that ended a pan is not a click.
@@ -2295,12 +2448,158 @@ function attachMapCursor() {
     setCursor(state.mapHoverValue, { source: 'map' })
   })
   canvas.addEventListener('mouseleave', () => {
-    if (!state.cursorPinned) setCursor(null, { source: 'map' })
+    if (!cursorLocked()) setCursor(null, { source: 'map' })
   })
   canvas.addEventListener('click', () => {
     if (state.dragMoved || state.mapHoverValue == null) return
     setCursor(state.mapHoverValue, { source: 'map', pin: true })
   })
+}
+
+/* ------------------------------------------------------- select and play */
+
+// The selection is held in the current axis's units, but playback runs on the
+// reference lap's clock: these two convert between them.
+function axisToTime(value) {
+  const reference = referenceLap()
+  if (!reference || !reference.lap) return null
+  if (state.axis === 'time') return value
+  return interpolate(reference.lap.channels.dist, reference.lap.channels.t, value)
+}
+
+function timeToAxis(time) {
+  const reference = referenceLap()
+  if (!reference || !reference.lap) return null
+  if (state.axis === 'time') return time
+  return interpolate(reference.lap.channels.t, reference.lap.channels.dist, time)
+}
+
+function setSelection(from, to) {
+  const full = axisMax()
+  const low = clamp(Math.min(from, to), 0, full)
+  const high = clamp(Math.max(from, to), 0, full)
+  // A stray click should not leave a zero-width selection behind.
+  state.selection = high - low < full / 500 ? null : { from: low, to: high }
+  stopPlayback()
+  updatePlaybackControls()
+  scheduleRedraw()
+}
+
+function clearSelection() {
+  state.selection = null
+  stopPlayback()
+  updatePlaybackControls()
+  scheduleRedraw()
+}
+
+// selectionOnMap turns a rubber-banded box into the stretch of the reference
+// lap that runs through it, so a box drawn over a corner selects that corner.
+function selectionOnMap(box) {
+  const reference = referenceLap()
+  const projected = state.mapProjected &&
+    state.mapProjected.find((item) => reference && lapKey(item.entry) === lapKey(reference))
+  const target = projected || (state.mapProjected && state.mapProjected[0])
+  if (!target) return
+  const values = axisValues(target.entry.lap)
+  let low = Infinity
+  let high = -Infinity
+  for (let i = 0; i < target.total; i += 1) {
+    const x = target.points[i * 2]
+    const y = target.points[i * 2 + 1]
+    if (x < box.left || x > box.right || y < box.top || y > box.bottom) continue
+    if (values[i] < low) low = values[i]
+    if (values[i] > high) high = values[i]
+  }
+  if (!isFinite(low)) return
+  setSelection(low, high)
+}
+
+function playbackBounds() {
+  const full = axisMax()
+  const from = state.selection ? state.selection.from : 0
+  const to = state.selection ? state.selection.to : full
+  const startTime = axisToTime(from)
+  const endTime = axisToTime(to)
+  if (startTime == null || endTime == null || endTime <= startTime) return null
+  return { startTime, endTime }
+}
+
+function togglePlayback() {
+  if (state.playback.playing) stopPlayback()
+  else startPlayback()
+  updatePlaybackControls()
+}
+
+function startPlayback() {
+  const bounds = playbackBounds()
+  if (!bounds) return
+  const playback = state.playback
+  playback.playing = true
+  // Resume where it was paused, unless that is outside the stretch.
+  if (playback.time < bounds.startTime || playback.time >= bounds.endTime) {
+    playback.time = bounds.startTime
+  }
+  let previous = performance.now()
+  const step = (now) => {
+    if (!playback.playing) return
+    const current = playbackBounds()
+    if (!current) { stopPlayback(); updatePlaybackControls(); return }
+    playback.time += ((now - previous) / 1000) * playback.speed
+    previous = now
+    if (playback.time >= current.endTime) {
+      if (playback.loop) playback.time = current.startTime
+      else {
+        playback.time = current.endTime
+        playback.playing = false
+        updatePlaybackControls()
+      }
+    }
+    const value = timeToAxis(playback.time)
+    if (value != null) {
+      // Playback owns the cursor the same way a pin does: hover must not fight it.
+      state.cursorX = value
+      followCursorOnMap()
+      scheduleRedraw()
+    }
+    if (playback.playing) playback.handle = requestAnimationFrame(step)
+  }
+  playback.handle = requestAnimationFrame(step)
+}
+
+function stopPlayback() {
+  const playback = state.playback
+  playback.playing = false
+  if (playback.handle) cancelAnimationFrame(playback.handle)
+  playback.handle = null
+}
+
+function cursorLocked() {
+  return state.cursorPinned || state.playback.playing
+}
+
+function updatePlaybackControls() {
+  const bar = el('playbackBar')
+  const hasLaps = loadedEntries().length > 0
+  bar.hidden = !hasLaps
+  el('playToggle').textContent = state.playback.playing ? '⏸' : '▶'
+  el('playToggle').title = state.playback.playing ? t('pause') : t('play')
+  el('loopToggle').classList.toggle('active', state.playback.loop)
+  el('loopToggle').title = t('loop')
+  el('playSpeed').value = String(state.playback.speed)
+
+  const label = el('selectionLabel')
+  if (!state.selection) {
+    label.textContent = t('selectionNone')
+    label.classList.remove('has-selection')
+    el('clearSelection').hidden = true
+    return
+  }
+  const unit = state.axis === 'dist' ? 'm' : 's'
+  const digits = state.axis === 'dist' ? 0 : 2
+  label.textContent =
+    `${state.selection.from.toFixed(digits)}–${state.selection.to.toFixed(digits)} ${unit}`
+  label.classList.add('has-selection')
+  el('clearSelection').hidden = false
 }
 
 /* ------------------------------------------------------------------ zoom */
@@ -2337,8 +2636,22 @@ function attachMapZoom() {
     scheduleRedraw()
   }, { passive: false })
 
+  canvas.addEventListener('contextmenu', (event) => event.preventDefault())
   canvas.addEventListener('mousedown', (event) => {
     state.dragMoved = false
+    if (event.button === 2 || (event.button === 0 && event.ctrlKey)) {
+      event.preventDefault()
+      const rect = canvas.getBoundingClientRect()
+      state.selecting = {
+        pane: 'map',
+        x0: event.clientX - rect.left,
+        y0: event.clientY - rect.top,
+        x1: event.clientX - rect.left,
+        y1: event.clientY - rect.top
+      }
+      scheduleRedraw()
+      return
+    }
     if (event.button !== 0 || state.mapView.scale <= 1.001) return
     event.preventDefault()
     state.mapDrag = {
@@ -2372,8 +2685,17 @@ function attachChartZoom(canvas) {
     scheduleRedraw()
   }, { passive: false })
 
+  canvas.addEventListener('contextmenu', (event) => event.preventDefault())
   canvas.addEventListener('mousedown', (event) => {
     state.dragMoved = false
+    if (event.button === 2 || (event.button === 0 && event.ctrlKey)) {
+      const value = chartValueAt(canvas, event.clientX)
+      if (value == null) return
+      event.preventDefault()
+      state.selecting = { pane: 'chart', from: value, to: value }
+      scheduleRedraw()
+      return
+    }
     if (event.button !== 0 || !isZoomed()) return
     const chart = state.charts.find((item) => item.canvas === canvas)
     if (!chart || !chart.geometry) return
@@ -2392,6 +2714,26 @@ function attachChartZoom(canvas) {
 // on a canvas must keep working after the pointer leaves it.
 function attachDragging() {
   document.addEventListener('mousemove', (event) => {
+    if (state.selecting) {
+      state.dragMoved = true
+      if (state.selecting.pane === 'map') {
+        const rect = el('map').getBoundingClientRect()
+        state.selecting.x1 = event.clientX - rect.left
+        state.selecting.y1 = event.clientY - rect.top
+      } else {
+        const canvas = state.charts[0] && state.charts[0].canvas
+        const chart = state.charts.find((item) => item.geometry)
+        if (chart) {
+          const rect = chart.canvas.getBoundingClientRect()
+          const { left, plotWidth, from, span } = chart.geometry
+          const ratio = clamp((event.clientX - rect.left - left) / plotWidth, 0, 1)
+          state.selecting.to = from + ratio * span
+        }
+        void canvas
+      }
+      scheduleRedraw()
+      return
+    }
     if (state.mapDrag || state.chartDrag) {
       const drag = state.mapDrag || state.chartDrag
       if (Math.abs(event.clientX - drag.x) > 3 || Math.abs(event.clientY - (drag.y ?? event.clientY)) > 3) {
@@ -2415,6 +2757,20 @@ function attachDragging() {
     }
   })
   document.addEventListener('mouseup', () => {
+    if (state.selecting) {
+      const gesture = state.selecting
+      state.selecting = null
+      if (gesture.pane === 'map') {
+        selectionOnMap({
+          left: Math.min(gesture.x0, gesture.x1),
+          right: Math.max(gesture.x0, gesture.x1),
+          top: Math.min(gesture.y0, gesture.y1),
+          bottom: Math.max(gesture.y0, gesture.y1)
+        })
+      } else {
+        setSelection(gesture.from, gesture.to)
+      }
+    }
     state.mapDrag = null
     state.chartDrag = null
     el('map').classList.remove('grabbing')
@@ -2429,7 +2785,7 @@ function attachDragging() {
 // is what lets the reader park a position on one pane and go work on the other.
 function setCursor(value, options = {}) {
   const { source, pin } = options
-  if (state.cursorPinned && !pin) return
+  if (cursorLocked() && !pin) return
   if (pin) state.cursorPinned = value != null
   if (state.cursorX === value) {
     if (pin) scheduleRedraw()
@@ -2663,6 +3019,7 @@ function render() {
   renderLapList()
   buildCharts()
   renderSummary()
+  updatePlaybackControls()
   writeHash()
   scheduleRedraw()
 }
@@ -2721,10 +3078,14 @@ function wire() {
     if (!chip) return
     state.axis = chip.dataset.axis
     for (const node of el('axisMode').children) node.classList.toggle('active', node === chip)
-    // The window is in the old axis's units; metres do not carry over to seconds.
+    // The window and the selection are in the old axis's units; metres do not
+    // carry over to seconds.
     state.xRange = null
+    state.selection = null
+    stopPlayback()
     state.cursorX = null
     updateZoomControls()
+    updatePlaybackControls()
     scheduleRedraw()
   })
 
@@ -2754,13 +3115,31 @@ function wire() {
   })
 
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') releaseCursor()
+    if (event.key === 'Escape') {
+      stopPlayback()
+      updatePlaybackControls()
+      releaseCursor()
+    }
+    // Space is the usual transport key, but not while typing in the search box.
+    if (event.key === ' ' && event.target === document.body) {
+      event.preventDefault()
+      togglePlayback()
+    }
   })
 
   attachMapCursor()
   attachMapZoom()
   attachDragging()
   el('rangeReset').addEventListener('click', resetRange)
+  el('playToggle').addEventListener('click', togglePlayback)
+  el('loopToggle').addEventListener('click', () => {
+    state.playback.loop = !state.playback.loop
+    updatePlaybackControls()
+  })
+  el('playSpeed').addEventListener('change', (event) => {
+    state.playback.speed = Number(event.target.value) || 1
+  })
+  el('clearSelection').addEventListener('click', clearSelection)
   window.addEventListener('resize', scheduleRedraw)
 }
 

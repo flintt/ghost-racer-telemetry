@@ -63,6 +63,14 @@ The two panes zoom independently:
 - **Track map**: the wheel zooms about the pointer (up to 40×), dragging pans once zoomed, and a double-click or the **1:1** button in the corner restores the fit. The point under the pointer stays pinned, so putting the pointer on a corner and scrolling magnifies that corner.
 - **Charts**: the wheel zooms the X window (down to 1/500 of the lap), dragging pans, a double-click resets. All six charts share the window, and the cursor and readout follow it. **The Y axis is scaled to what is inside the window**, so zooming into one corner actually expands its speed trace instead of leaving it flat against the whole-lap range. A `Full · 900–1500 m` reset button appears in the bar.
 
+### Selecting a stretch, and playing it back
+
+**Right-drag** or **Ctrl-drag** selects a stretch: on a chart that is a range along the X axis, on the map it rubber-bands a box and the piece of track inside it becomes the range. The selection is shaded on the charts and drawn thick on the map.
+
+The transport in the bar plays it back: ▶ (space works too), ⟲ loop, 0.25×–4× speed, ✕ to clear. Playback runs on the reference lap's real clock and moves every selected recording at once — they run the stretch side by side. Hover cannot disturb the cursor while it plays, just as with a pin. With nothing selected it plays the whole lap.
+
+The **bottom-right of the map** carries in-game style vertical gauges: one cluster per recording with `T` throttle (green), `B` brake (red), `H` handbrake (amber), the current **gear** underneath, and the recording's colour along the top (up to four, and only recordings that carry driver inputs). The speed legend keeps the bottom-left corner where it was.
+
 **Click to pin the cursor.** The cursor follows the mouse, so moving from the charts over to the map — to zoom, or to look at a corner — lets the map's own hover snap it to whatever is near the pointer, and the position you were reading is gone. **Clicking** on a chart or the map parks the cursor where it is: while pinned, no hover can move or clear it, so you are free to zoom and pan on the other pane and come back to the same point. A pinned cursor draws as a solid orange line, its point on the map gets an orange halo, and a `📌 Pinned` badge appears in the readout — click the badge to bring the map to that point, click the ✕ or press **Esc** to release. Clicking somewhere else re-pins there. The sector table behaves the same way: hovering previews, clicking pins.
 
 **The recording list above and the summary/sectors panel below both collapse** (the caret in their headers), handing all of the room to the map and the charts. The state is remembered in the browser.

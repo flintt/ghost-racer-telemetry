@@ -1,3 +1,29 @@
+// followCursorOnMap keeps the point the cursor refers to in the middle of a
+// zoomed map.
+//
+// This used to nudge by the least amount that brought the point back inside a
+// safe box, to stop the map crawling under the reader. Zoomed in that reads as
+// broken: after the first correction the point rides the edge of the box and
+// never comes back to the middle. The cursor itself moves smoothly, so centring
+// on it is smooth too — and it is what "follow" is expected to mean.
+function followCursorOnMap() {
+  const view = state.mapView
+  const projection = state.mapProjection
+  if (view.scale <= 1.001 || state.cursorX == null || state.mapDrag || !projection) return
+  // Heading up keeps the cursor at the anchor by construction.
+  if (state.mapOrientation === 'heading') return
+
+  const anchor = cursorAnchor()
+  if (!anchor) return
+  const panX = projection.width / 2 - anchor.x
+  const panY = projection.height / 2 - anchor.y
+  // A dead zone, so a still cursor cannot jitter the view by fractions.
+  if (Math.abs(panX) < 1 && Math.abs(panY) < 1) return
+
+  view.panX += panX
+  view.panY += panY
+}
+
 /*
  * Ghost Racer telemetry browser.
  *
@@ -3428,6 +3454,15 @@ function attachChartZoom(canvas) {
 // on a canvas must keep working after the pointer leaves it.
 function attachDragging() {
   document.addEventListener('mousemove', (event) => {
+    // A mouseup released outside the window never reaches us; without this the
+    // drag stays armed and the map pans, or following stays switched off, for
+    // the rest of the session.
+    if (event.buttons === 0 && (state.mapDrag || state.chartDrag || state.selecting)) {
+      state.mapDrag = null
+      state.chartDrag = null
+      state.selecting = null
+      el('map').classList.remove('grabbing')
+    }
     if (state.selecting) {
       state.dragMoved = true
       if (state.selecting.pane === 'map') {

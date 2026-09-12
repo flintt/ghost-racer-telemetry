@@ -73,9 +73,9 @@ go build -o ghost-racer-telemetry .   # Windows: GOOS=windows GOARCH=amd64 go bu
 - **按 `drivability` 过滤，不按材质**。`DecalRoad` 不是"路"这个类——人行道、停车位标线、路缘、地面裂纹、建筑周围的水泥裙边全是 DecalRoad，全画出来是一张镇子的平面图而不是赛道。游戏自己的判据是 drivability：BeamNG 的地图制作指南让作者**复制一条路、把材质改成 `road_invisible`、drivability 设成 1**，路才会出现在游戏内 minimap 上——也就是说 **minimap 画的就是这层"故意隐形但可驾驶"的 AI 路网**。所以隐形材质是"这是真路"的标志，反而要保留；该丢的是那些画上去的装饰贴花。
 - **路面画成一个整体**：逐段梯形 + **每个节点一个圆盘**，全部累积进一条路径**一次填充**（这是 BeamNG 导航 App 自己的画法：它对 navgraph 的每条 link 画梯形并在两端各加一个圆）。只在每条路的两端加圆是不够的——弯折处和路与路的接头都会裂。圆盘和梯形必须**同向缠绕**，否则 nonzero 规则会让它们互相抵消，在路中间挖出一排缺口。
 - **端口自动焊接**：短缝（路宽 + 4 米以内）按距离直接接上；长缝最远到 60 米，但**必须两端互相指向对方**才接——桥面是独立对象，两侧的路网可能差几十米，但它是**顺着自己的方向**停下的，横穿的路不会。两种判据都带高差限制（`2.5 + 缝长 × 0.15` 米），所以立交桥永远不会被粘到下面的路上。
-- **Prefab 里的路也读**：桥常常是预制件，对象存在独立的 `.prefab.json` 里而不是 `items.level.json`。这类文件是整篇 JSON 而不是按行的对象，所以按行解析找不到东西时会退回到**整篇文档递归遍历**，把任何 `class` 是 `DecalRoad`/`MeshRoad` 的对象捡出来。
+- **Prefab 里的路也读，两种格式都读**：桥常常是预制件。新的是 `.prefab.json`（整篇 JSON 而不是按行对象，所以按行解析失败时会退回**整篇递归遍历**）；旧的是 **TorqueScript 文本 `.prefab`**——hirochi_raceway 有 8 个 JSON、**56 个 Torque**，桥就在后者里。Torque 的形状是 `new DecalRoad(name) { Material = "…"; drivability = "1"; Node = "x y z width"; };`，字段名大小写跨版本会变、对象会嵌套，所以解析器按大小写不敏感匹配并跟踪花括号深度，不假设结构。
 - **缓存以「格式版本 + 构建版本」为键**：只按存档大小和时间校验是不够的——存档没变，但解析器变了，旧缓存会让新增的解析完全不生效（MeshRoad 和 prefab 两次都栽在这上面：手动升版本号是会忘的）。加上构建版本后，换了二进制必然重新解析。
-- `?stats=1` 里的 `files` 会报告实际扫了哪些文件：`items`、`prefabJSON`，以及 `prefabObjects`——最后这个是旧式 Torque 文本格式的 `.prefab`，**本程序读不了**，如果某张图的桥在里面，这个计数就是答案。
+- `?stats=1` 里的 `files` 会报告实际扫了哪些文件：`items`、`prefabJSON`、`prefabTorque`，以及 `prefabRoads`（从 prefab 里读出来的路数）。
 - **桥和高架也读**：那些是 `MeshRoad`（节点比 DecalRoad 多一个深度值，前四个数含义相同），而且往往自身没有 drivability——按 drivability 过滤会恰好在桥这里把路面切断，所以 MeshRoad 不走 drivability 判据
 - `?visible=1` 可以反过来只要可见材质，`?mindriv=` 可以调阈值；`?stats=1` 会列出该关卡的材质分布（条数、节点数、可驾驶数、中位宽度），用来核对过滤规则
 - 只取圈的包围盒附近的路（外扩 300 米），不会把整张地图的路都塞过来

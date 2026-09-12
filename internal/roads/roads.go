@@ -71,11 +71,7 @@ type item struct {
 type Source struct {
 	Description string
 	files       []itemsFile
-	// prefabCandidates counts old-style .prefab files, which are Torque text and
-	// not JSON. If a level's bridges live in those, nothing here can read them
-	// and the count is what says so.
-	prefabCandidates int
-	closer           func() error
+	closer      func() error
 }
 
 type itemsFile struct {
@@ -161,12 +157,16 @@ func fileKind(name string) string {
 	if strings.HasSuffix(lower, ".prefab.json") {
 		return "prefabJSON"
 	}
+	if strings.HasSuffix(lower, ".prefab") {
+		return "prefabTorque"
+	}
 	return "items"
 }
 
 func carriesObjects(lowerName string) bool {
 	return strings.HasSuffix(lowerName, "items.level.json") ||
-		strings.HasSuffix(lowerName, ".prefab.json")
+		strings.HasSuffix(lowerName, ".prefab.json") ||
+		strings.HasSuffix(lowerName, ".prefab")
 }
 
 // levelPrefix is where a level's objects live inside an archive or a mod tree.
@@ -184,10 +184,6 @@ func openArchive(path, level string) *Source {
 	for _, file := range reader.File {
 		name := strings.ToLower(filepath.ToSlash(file.Name))
 		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		if strings.HasSuffix(name, ".prefab") {
-			source.prefabCandidates++
 			continue
 		}
 		if !carriesObjects(name) {
@@ -259,7 +255,6 @@ func Extract(source *Source, level string) (*Level, error) {
 			return nil, fmt.Errorf("%s: %w", file.name, err)
 		}
 	}
-	result.Files["prefabObjects"] = source.prefabCandidates
 	if len(result.Roads) == 0 {
 		return nil, fmt.Errorf("no roads found in %s", source.Description)
 	}
@@ -275,6 +270,12 @@ func readItems(file itemsFile, into *Level) error {
 	stream.Close()
 	if err != nil {
 		return err
+	}
+	// TorqueScript prefabs name their classes without quotes, so they are tested
+	// before the JSON shortcut below.
+	if looksLikeTorque(data) {
+		into.Files["prefabRoads"] += readTorque(data, into)
+		return nil
 	}
 	if !bytes.Contains(data, []byte(`"DecalRoad"`)) && !bytes.Contains(data, []byte(`"MeshRoad"`)) {
 		return nil
@@ -490,3 +491,9 @@ func round(value float64, digits int) float64 {
 	scale := math.Pow(10, float64(digits))
 	return math.Round(value*scale) / scale
 }
+
+func inf(sign int) float64 { return math.Inf(sign) }
+
+func min(a, b float64) float64 { return math.Min(a, b) }
+
+func max(a, b float64) float64 { return math.Max(a, b) }

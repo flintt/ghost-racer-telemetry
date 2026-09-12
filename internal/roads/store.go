@@ -23,7 +23,7 @@ type Store struct {
 // which is exactly how MeshRoad bridges and then prefab roads both went on
 // missing after support for them was added. The build version is therefore part
 // of the key too, so a cache can never outlive the code that wrote it.
-const cacheFormat = 3
+const cacheFormat = 4
 
 type cacheFile struct {
 	Format      int       `json:"format"`

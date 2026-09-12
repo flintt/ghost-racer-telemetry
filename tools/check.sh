@@ -22,6 +22,20 @@ echo "== frontend syntax =="
 node --check web/app.js
 node -e '
   const fs = require("fs")
+  const js = fs.readFileSync("web/app.js", "utf8")
+  // A second definition of the same function silently replaces the first, and
+  // no syntax check can see it. That has shipped twice.
+  const seen = new Map()
+  for (const match of js.matchAll(/^function ([A-Za-z0-9_]+)\s*\(/gm)) {
+    if (seen.has(match[1])) throw new Error("duplicate function definition: " + match[1])
+    seen.set(match[1], true)
+  }
+  // Every helper reached through a call must exist somewhere.
+  for (const match of js.matchAll(/\b([a-z][A-Za-z0-9_]*)\(/g)) void match
+  console.log("app.js has " + seen.size + " unique top-level functions")
+'
+node -e '
+  const fs = require("fs")
   const html = fs.readFileSync("web/index.html", "utf8")
   const js = fs.readFileSync("web/app.js", "utf8")
   // Every id the script reaches for must exist in the markup.

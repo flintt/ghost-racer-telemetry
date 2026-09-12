@@ -14,14 +14,24 @@ function followCursorOnMap() {
   if (state.mapOrientation === 'heading') return
 
   const anchor = cursorAnchor()
-  if (!anchor) return
-  const panX = projection.width / 2 - anchor.x
-  const panY = projection.height / 2 - anchor.y
-  // A dead zone, so a still cursor cannot jitter the view by fractions.
-  if (Math.abs(panX) < 1 && Math.abs(panY) < 1) return
+  const used = state.mapProjectedView
+  if (!anchor || !used) return
 
-  view.panX += panX
-  view.panY += panY
+  // The cached point was projected under `used`; solving back to the fit's own
+  // coordinates lets the new pan be computed exactly. Nudging by the on-screen
+  // difference instead only converges when nothing else changed, so a cursor
+  // move right after a zoom would land hundreds of pixels short.
+  const centreX = projection.centreX
+  const centreY = projection.centreY
+  const baseX = (anchor.x - centreX - used.panX) / used.scale + centreX
+  const baseY = (anchor.y - centreY - used.panY) / used.scale + centreY
+  const panX = projection.width / 2 - centreX - (baseX - centreX) * view.scale
+  const panY = projection.height / 2 - centreY - (baseY - centreY) * view.scale
+
+  // A dead zone, so a still cursor cannot jitter the view by fractions.
+  if (Math.abs(panX - view.panX) < 1 && Math.abs(panY - view.panY) < 1) return
+  view.panX = panX
+  view.panY = panY
 }
 
 /*
@@ -1662,6 +1672,98 @@ function paintRoads(context, projection) {
   fillNetwork(context, projection, 0, themeColor('--road-fill'))
 }
 
+// Some level features have no road geometry at all: hirochi_raceway's bridge is
+// a static mesh, absent from items files, prefabs and every other object list,
+// so no parser can recover it and the surface simply stops there.
+//
+// The lap is the evidence that stands in: the car drove over it. Where the
+// reference lap runs with no road under it, a corridor of its own path is laid
+// down instead, at the width the surrounding roads use.
+const COVERAGE_CELL = 24
+const COVERAGE_SLACK = 6
+
+function roadCoverageIndex() {
+  if (state.coverageKey === state.roads.key) return state.coverageIndex
+  const cells = new Map()
+  let widthTotal = 0
+  let widthCount = 0
+  for (const road of state.roads.roads) {
+    for (const node of road.nodes || []) {
+      if (!validNode(node)) continue
+      widthTotal += node[3]
+      widthCount += 1
+      const key = `${Math.floor(node[0] / COVERAGE_CELL)}:${Math.floor(node[1] / COVERAGE_CELL)}`
+      let bucket = cells.get(key)
+      if (!bucket) {
+        bucket = []
+        cells.set(key, bucket)
+      }
+      bucket.push(node)
+    }
+  }
+  state.coverageKey = state.roads.key
+  state.coverageIndex = { cells, medianWidth: widthCount ? widthTotal / widthCount : 8 }
+  return state.coverageIndex
+}
+
+// uncoveredSpans walks the reference lap and returns the stretches with no road
+// beneath, as index ranges into its samples.
+function uncoveredSpans(entry) {
+  const index = roadCoverageIndex()
+  const channels = entry.lap.channels
+  const spans = []
+  let start = -1
+
+  for (let i = 0; i < channels.x.length; i += 1) {
+    const x = channels.x[i]
+    const y = channels.y[i]
+    const cellX = Math.floor(x / COVERAGE_CELL)
+    const cellY = Math.floor(y / COVERAGE_CELL)
+    let covered = false
+    for (let ox = -1; ox <= 1 && !covered; ox += 1) {
+      for (let oy = -1; oy <= 1 && !covered; oy += 1) {
+        const bucket = index.cells.get(`${cellX + ox}:${cellY + oy}`)
+        if (!bucket) continue
+        for (const node of bucket) {
+          const reach = node[3] / 2 + COVERAGE_SLACK
+          if ((node[0] - x) ** 2 + (node[1] - y) ** 2 <= reach * reach) {
+            covered = true
+            break
+          }
+        }
+      }
+    }
+    if (covered) {
+      if (start >= 0 && i - start > 4) spans.push([start, i])
+      start = -1
+    } else if (start < 0) {
+      start = i
+    }
+  }
+  if (start >= 0 && channels.x.length - start > 4) spans.push([start, channels.x.length - 1])
+  return spans
+}
+
+function fillDrivenFallback(path, projection, grow) {
+  const reference = referenceLap()
+  if (!reference || !reference.lap) return 0
+  const width = roadCoverageIndex().medianWidth
+  const channels = reference.lap.channels
+  let filled = 0
+
+  for (const [from, to] of uncoveredSpans(reference)) {
+    let previous = null
+    for (let i = from; i <= to; i += 1) {
+      const node = [channels.x[i], channels.y[i], channels.z[i], width]
+      if (previous) addSegment(path, previous, node, projection, grow)
+      addDisc(path, node, projection, grow)
+      previous = node
+    }
+    filled += 1
+  }
+  return filled
+}
+
 function fillNetwork(context, projection, grow, colour) {
   const path = new Path2D()
   for (const road of state.roads.roads) {
@@ -1675,6 +1777,7 @@ function fillNetwork(context, projection, grow, colour) {
     }
   }
   for (const [from, to] of roadJoins()) addSegment(path, from, to, projection, grow)
+  state.roadFallbackSpans = fillDrivenFallback(path, projection, grow)
   context.fillStyle = colour
   context.fill(path)
 }
@@ -2169,6 +2272,9 @@ function drawMap() {
     const projection = mapProjection(entries, width, height)
     state.mapProjection = projection
     state.mapProjected = projectEntries(entries, projection)
+    // The view those screen coordinates were produced with, so a later
+    // correction can undo it exactly instead of chasing its own tail.
+    state.mapProjectedView = { scale: view.scale, panX: view.panX, panY: view.panY }
   }
   const buffer = ensureLayer(mapLayer, width, height, ratio, key, (target) => {
     // Roads first: the racing line belongs on top of the tarmac, not under it.
@@ -3010,6 +3116,11 @@ function attachCursor(canvas) {
   })
 }
 
+// How close the pointer has to be to a lap's line, in pixels, for hovering the
+// map to move the shared cursor. Click to pin if you want it to stop moving at
+// all.
+const MAP_HOVER_RADIUS = 18
+
 function attachMapCursor() {
   const canvas = el('map')
   canvas.addEventListener('mousemove', (event) => {
@@ -3040,7 +3151,11 @@ function attachMapCursor() {
         best = { entry, index: bestIndex, distance: bestDistance }
       }
     }
-    if (!best || best.distance > 40 ** 2) return
+    // Snap only when the pointer is genuinely on the line. A generous radius
+    // means the cursor — and with it every chart, gauge and readout — is stolen
+    // whenever the pointer merely crosses the map on its way somewhere else,
+    // which reads as the dot chasing the mouse.
+    if (!best || best.distance > MAP_HOVER_RADIUS ** 2) return
     state.hoverLapKey = lapKey(best.entry)
     state.mapHoverValue = axisValues(best.entry.lap)[best.index]
     setCursor(state.mapHoverValue, { source: 'map' })
@@ -3590,41 +3705,6 @@ function cursorAnchor() {
 // of the viewport. Recentring on every step would make the map crawl under the
 // reader; leaving it alone until the point nears an edge keeps it still for
 // most of a scrub and never loses the point.
-function followCursorOnMap() {
-  const view = state.mapView
-  const projection = state.mapProjection
-  if (view.scale <= 1.001 || state.cursorX == null || state.mapDrag || !projection) return
-  // Heading up keeps the cursor at the anchor by construction.
-  if (state.mapOrientation === 'heading') return
-
-  const anchor = cursorAnchor()
-  if (!anchor) return
-  const { width, height } = projection
-  const marginX = width * 0.2
-  const marginY = height * 0.2
-
-  // Pan by the least that brings the point back inside the safe box. Scrubbing
-  // then slides the map smoothly along with the cursor instead of snapping it
-  // to the centre on every step.
-  let panX = 0
-  let panY = 0
-  if (anchor.x < marginX) panX = marginX - anchor.x
-  else if (anchor.x > width - marginX) panX = width - marginX - anchor.x
-  if (anchor.y < marginY) panY = marginY - anchor.y
-  else if (anchor.y > height - marginY) panY = height - marginY - anchor.y
-  if (panX === 0 && panY === 0) return
-
-  // A jump of more than a screen is not a scrub — it is the cursor landing
-  // somewhere else entirely (a sector row, say). Centre on it instead of
-  // dragging it in from off screen.
-  if (Math.abs(panX) > width * 0.75 || Math.abs(panY) > height * 0.75) {
-    panX = width / 2 - anchor.x
-    panY = height / 2 - anchor.y
-  }
-
-  view.panX += panX
-  view.panY += panY
-}
 
 let redrawHandle = null
 function scheduleRedraw() {

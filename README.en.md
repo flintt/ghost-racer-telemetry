@@ -65,7 +65,7 @@ The two panes zoom independently:
 
 ### Selecting a stretch, and playing it back
 
-**Right-drag** or **Ctrl-drag** selects a stretch: on a chart that is a range along the X axis, on the map it rubber-bands a box and the piece of track inside it becomes the range. The selection is shaded on the charts and drawn thick on the map.
+**Right-drag** or **Ctrl-drag** selects a stretch: on a chart that is a range along the X axis, on the map it rubber-bands a box and the piece of track inside it becomes the range. The selection is shaded on the charts. On the map it is only **thickened, with a tick across the line at each end** — its colour is left alone, because whatever the colour mode is showing through that stretch is exactly what you selected it to look at.
 
 The transport in the bar plays it back: ▶ (space works too), ⟲ loop, 0.25×–4× speed, ✕ to clear. Playback runs on the reference lap's real clock and moves every selected recording at once — they run the stretch side by side. Hover cannot disturb the cursor while it plays, just as with a pin. With nothing selected it plays the whole lap.
 

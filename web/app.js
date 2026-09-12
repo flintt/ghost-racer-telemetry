@@ -1850,32 +1850,86 @@ function paintGate(context, projection, position, normal, halfWidth, color, labe
   context.fillText(label, bx + 4, by)
 }
 
-// drawSelectionOnMap thickens the stretch that is selected, so the box drawn
-// over a corner reads back as a piece of the racing line.
+// drawSelectionOnMap marks the selected stretch WITHOUT repainting it in a flat
+// colour: the trace keeps whatever the colour mode is showing there — which is
+// the whole point of looking at that stretch — and the selection reads as extra
+// width plus a tick at each end.
 function drawSelectionOnMap(context) {
   if (!state.selection || !state.mapProjected) return
-  for (const { entry, points, total } of state.mapProjected) {
-    const values = axisValues(entry.lap)
-    context.strokeStyle = entry.color
-    context.lineWidth = 4
-    context.lineJoin = 'round'
-    context.lineCap = 'round'
-    context.beginPath()
-    let drawing = false
-    for (let i = 0; i < total; i += 1) {
-      if (values[i] < state.selection.from || values[i] > state.selection.to) {
-        drawing = false
-        continue
-      }
-      if (!drawing) {
-        context.moveTo(points[i * 2], points[i * 2 + 1])
-        drawing = true
-      } else {
-        context.lineTo(points[i * 2], points[i * 2 + 1])
-      }
+  const scales = colorScales()
+  for (const projected of state.mapProjected) {
+    const values = axisValues(projected.entry.lap)
+    let first = -1
+    let last = -1
+    for (let i = 0; i < projected.total; i += 1) {
+      if (values[i] < state.selection.from || values[i] > state.selection.to) continue
+      if (first < 0) first = i
+      last = i
     }
-    context.stroke()
+    if (first < 0 || last <= first) continue
+    strokeRangeInDataColours(context, projected, scales, first, last, 5)
+    drawStretchTick(context, projected, first)
+    drawStretchTick(context, projected, last)
   }
+}
+
+// strokeRangeInDataColours redraws part of a trace at a given width, keeping the
+// per-sample colouring the current mode produces (the same run batching the
+// static layer uses, so a long stretch is still a handful of strokes).
+function strokeRangeInDataColours(context, projected, scales, first, last, lineWidth) {
+  const { entry, points } = projected
+  const flat = state.colorMode === 'lap'
+  context.lineWidth = lineWidth
+  context.lineJoin = 'round'
+  context.lineCap = 'round'
+
+  if (flat) {
+    context.strokeStyle = entry.color
+    context.beginPath()
+    context.moveTo(points[first * 2], points[first * 2 + 1])
+    for (let i = first + 1; i <= last; i += 1) context.lineTo(points[i * 2], points[i * 2 + 1])
+    context.stroke()
+    return
+  }
+
+  let runKey = pointColorKey(entry, first, scales)
+  context.beginPath()
+  context.moveTo(points[first * 2], points[first * 2 + 1])
+  for (let i = first + 1; i <= last; i += 1) {
+    const x = points[i * 2]
+    const y = points[i * 2 + 1]
+    const key = pointColorKey(entry, i, scales)
+    context.lineTo(x, y)
+    if (key !== runKey) {
+      context.strokeStyle = colorForKey(runKey, entry)
+      context.stroke()
+      context.beginPath()
+      context.moveTo(x, y)
+      runKey = key
+    }
+  }
+  context.strokeStyle = colorForKey(runKey, entry)
+  context.stroke()
+}
+
+// drawStretchTick puts a short bar across the line at a stretch boundary, so
+// where the selection starts and ends is readable without recolouring anything.
+function drawStretchTick(context, projected, index) {
+  const { points, total } = projected
+  const other = index + 1 < total ? index + 1 : index - 1
+  if (other < 0) return
+  const dx = points[other * 2] - points[index * 2]
+  const dy = points[other * 2 + 1] - points[index * 2 + 1]
+  const length = Math.hypot(dx, dy) || 1
+  const nx = -dy / length
+  const ny = dx / length
+  const reach = 7
+  context.strokeStyle = themeColor('--chart-cursor-pinned')
+  context.lineWidth = 2
+  context.beginPath()
+  context.moveTo(points[index * 2] - nx * reach, points[index * 2 + 1] - ny * reach)
+  context.lineTo(points[index * 2] + nx * reach, points[index * 2 + 1] + ny * reach)
+  context.stroke()
 }
 
 function drawSelectionBox(context) {

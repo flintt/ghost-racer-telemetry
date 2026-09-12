@@ -30,8 +30,12 @@ var (
 
 type torqueFrame struct {
 	depth int
-	road  *Road
-	nodes [][]float64
+	// opened goes true once the object's brace has been seen. Torque writers
+	// sometimes put it on the line after `new Thing(name)`, and without this the
+	// frame closes on the very line it opened and the object is thrown away.
+	opened bool
+	road   *Road
+	nodes  [][]float64
 }
 
 // looksLikeTorque distinguishes a TorqueScript prefab from a JSON one without
@@ -83,9 +87,12 @@ func readTorque(data []byte, into *Level) int {
 		}
 
 		depth += strings.Count(line, "{") - strings.Count(line, "}")
+		if len(stack) > 0 && depth > stack[len(stack)-1].depth {
+			stack[len(stack)-1].opened = true
+		}
 
 		// A frame closes when the depth falls back to where it opened.
-		for len(stack) > 0 && depth <= stack[len(stack)-1].depth {
+		for len(stack) > 0 && stack[len(stack)-1].opened && depth <= stack[len(stack)-1].depth {
 			frame := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 			flush(frame)

@@ -119,3 +119,27 @@ func TestTorquePrefabInsideArchive(t *testing.T) {
 		t.Errorf("the prefab bridge was filtered out of %d kept roads", len(kept))
 	}
 }
+
+// Some writers put the brace on its own line. Without allowing for that the
+// object closes on the line it opened and is dropped.
+const torqueBraceOnNextLine = `new SimGroup(group)
+{
+   new DecalRoad(deck)
+   {
+      Material = "road_asphalt_2lane";
+      drivability = "1";
+      Node = "0 0 5 8";
+      Node = "50 0 5 8";
+   };
+};
+`
+
+func TestTorqueTolerateBraceOnNextLine(t *testing.T) {
+	level := &Level{Files: map[string]int{}, Bounds: [4]float64{inf(1), inf(1), inf(-1), inf(-1)}}
+	if found := readTorque([]byte(torqueBraceOnNextLine), level); found != 1 {
+		t.Fatalf("read %d roads, want 1", found)
+	}
+	if len(level.Roads[0].Nodes) != 2 {
+		t.Errorf("nodes = %v", level.Roads[0].Nodes)
+	}
+}

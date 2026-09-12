@@ -14,11 +14,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/flintt/ghost-racer-telemetry/internal/ghost"
+	"github.com/flintt/ghost-racer-telemetry/internal/roads"
 )
 
 //go:embed web
@@ -32,6 +35,8 @@ type server struct {
 	importRoot  ghost.Root
 	allowDelete bool
 	token       string
+	gameInstall string
+	roads       *roads.Store
 }
 
 func main() {
@@ -41,6 +46,7 @@ func main() {
 	webDir := flag.String("web", "", "serve the UI from this directory instead of the embedded copy")
 	allowDelete := flag.Bool("allow-delete", false, "allow deleting laps from the game folder (close BeamNG first)")
 	token := flag.String("token", "", "require this token on /api/import as ?token= or X-Ghost-Token")
+	gameInstall := flag.String("game", "", "BeamNG install directory, for reading road geometry out of the level archives (auto-detected when empty)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 
@@ -69,11 +75,14 @@ func main() {
 	}
 	roots = append(roots, importRoot)
 
+	install := resolveGameInstall(*gameInstall)
 	app := &server{
 		scanner:     ghost.NewScanner(roots),
 		importRoot:  importRoot,
 		allowDelete: *allowDelete,
 		token:       *token,
+		gameInstall: install,
+		roads:       roads.NewStore(filepath.Join(filepath.Dir(importRoot.Path), "roads")),
 	}
 	catalog := app.scanner.Scan()
 
@@ -84,6 +93,7 @@ func main() {
 	mux.HandleFunc("/api/laps", app.handleLaps)
 	mux.HandleFunc("/api/lap", app.handleLap)
 	mux.HandleFunc("/api/import", app.handleImport)
+	mux.HandleFunc("/api/roads", app.handleRoads)
 
 	fmt.Printf("Ghost Racer telemetry web %s\n", version)
 	for _, root := range catalog.Roots {
@@ -101,6 +111,9 @@ func main() {
 		fmt.Printf("     Laps there can be deleted for real, with no -allow-delete guard.\n")
 		fmt.Printf("     To browse the game's recordings read-only, use -root instead:\n")
 		fmt.Printf("       %s -root %q\n\n", filepath.Base(os.Args[0]), importRoot.Path)
+	}
+	if install != "" {
+		fmt.Printf("  %-6s %s  (road geometry)\n", "levels", install)
 	}
 	fmt.Printf("  open   http://%s/\n", *addr)
 	if err := http.ListenAndServe(*addr, logRequests(mux)); err != nil {
@@ -228,6 +241,71 @@ func looksLikeGameFolder(path string) bool {
 	return len(matches) > 0
 }
 
+// resolveGameInstall finds the BeamNG installation — not the user folder, the
+// place the level archives live. Steam keeps its libraries in a text manifest,
+// which is the only reliable way to find an install on a second drive.
+func resolveGameInstall(configured string) string {
+	candidates := []string{}
+	if configured != "" {
+		candidates = append(candidates, strings.TrimRight(strings.Trim(strings.TrimSpace(configured), `"'`), `\/`))
+	} else {
+		for _, library := range steamLibraries() {
+			candidates = append(candidates, filepath.Join(library, "steamapps", "common", "BeamNG.drive"))
+		}
+	}
+	for _, candidate := range candidates {
+		if stat, err := os.Stat(filepath.Join(candidate, "content", "levels")); err == nil && stat.IsDir() {
+			absolute, _ := filepath.Abs(candidate)
+			return absolute
+		}
+	}
+	if configured != "" {
+		log.Printf("game install: no content/levels under %s", configured)
+	}
+	return ""
+}
+
+var steamPathLine = regexp.MustCompile(`"path"\s+"([^"]+)"`)
+
+func steamLibraries() []string {
+	roots := []string{}
+	home, _ := os.UserHomeDir()
+	for _, variable := range []string{"ProgramFiles(x86)", "ProgramFiles"} {
+		if base := os.Getenv(variable); base != "" {
+			roots = append(roots, filepath.Join(base, "Steam"))
+		}
+	}
+	if home != "" {
+		roots = append(roots,
+			filepath.Join(home, ".steam", "steam"),
+			filepath.Join(home, ".local", "share", "Steam"),
+			filepath.Join(home, "Library", "Application Support", "Steam"),
+		)
+	}
+
+	libraries := []string{}
+	seen := map[string]bool{}
+	add := func(path string) {
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		libraries = append(libraries, path)
+	}
+	for _, root := range roots {
+		add(root)
+		// Other drives are listed in the library manifest.
+		data, err := os.ReadFile(filepath.Join(root, "steamapps", "libraryfolders.vdf"))
+		if err != nil {
+			continue
+		}
+		for _, match := range steamPathLine.FindAllStringSubmatch(string(data), -1) {
+			add(strings.ReplaceAll(match[1], `\\`, `\`))
+		}
+	}
+	return libraries
+}
+
 func defaultDataDir() string {
 	base, err := os.UserConfigDir()
 	if err != nil || base == "" {
@@ -289,6 +367,51 @@ func (s *server) library(request *http.Request) (*ghost.Library, ghost.Root, err
 		return nil, ghost.Root{}, fmt.Errorf("unknown root %s", library.Root)
 	}
 	return library, root, nil
+}
+
+// handleRoads serves the road geometry around a lap. The box comes from the
+// caller because only the client knows which part of a county it is looking at.
+func (s *server) handleRoads(writer http.ResponseWriter, request *http.Request) {
+	level := request.URL.Query().Get("level")
+	if level == "" {
+		writeError(writer, http.StatusBadRequest, "missing level parameter")
+		return
+	}
+	extracted, err := s.roads.Load(s.gameInstall, level)
+	if err != nil {
+		writeError(writer, http.StatusNotFound, err.Error())
+		return
+	}
+
+	query := request.URL.Query()
+	minX := floatParam(query.Get("minx"), extracted.Bounds[0])
+	minY := floatParam(query.Get("miny"), extracted.Bounds[1])
+	maxX := floatParam(query.Get("maxx"), extracted.Bounds[2])
+	maxY := floatParam(query.Get("maxy"), extracted.Bounds[3])
+	margin := floatParam(query.Get("margin"), 120)
+	clipped := extracted.Clip(minX-margin, minY-margin, maxX+margin, maxY+margin,
+		query.Get("ai") == "1")
+
+	nodes := 0
+	for _, road := range clipped {
+		nodes += len(road.Nodes)
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"level":      extracted.Level,
+		"source":     extracted.Source,
+		"roads":      clipped,
+		"roadCount":  len(clipped),
+		"nodeCount":  nodes,
+		"totalRoads": len(extracted.Roads),
+	})
+}
+
+func floatParam(raw string, fallback float64) float64 {
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return fallback
+	}
+	return value
 }
 
 func (s *server) handleCatalog(writer http.ResponseWriter, request *http.Request) {

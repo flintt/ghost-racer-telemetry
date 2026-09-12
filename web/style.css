@@ -22,6 +22,8 @@
   --chart-dot-ring: rgba(10, 13, 18, 0.85);
   --chart-reference-dim: rgba(230, 237, 243, 0.45);
   --trace-muted: rgba(139, 152, 169, 0.32);
+  --road-fill: rgba(120, 132, 148, 0.22);
+  --road-edge: rgba(150, 162, 178, 0.45);
   --radius: 10px;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
@@ -53,6 +55,8 @@
     --chart-dot-ring: rgba(255, 255, 255, 0.9);
     --chart-reference-dim: rgba(22, 32, 43, 0.4);
     --trace-muted: rgba(95, 108, 124, 0.28);
+    --road-fill: rgba(120, 132, 148, 0.18);
+    --road-edge: rgba(90, 102, 118, 0.45);
   }
 }
 
@@ -79,6 +83,8 @@
   --chart-dot-ring: rgba(255, 255, 255, 0.9);
   --chart-reference-dim: rgba(22, 32, 43, 0.4);
   --trace-muted: rgba(95, 108, 124, 0.28);
+  --road-fill: rgba(120, 132, 148, 0.18);
+  --road-edge: rgba(90, 102, 118, 0.45);
 }
 
 * { box-sizing: border-box; }
@@ -269,6 +275,12 @@ input[type="search"]:focus, .select:focus { outline: 1px solid var(--accent); bo
 .map-card { position: relative; border-right: 1px solid var(--line); min-width: 0; min-height: 0; overflow: hidden; }
 .map-card canvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
 .map-card canvas.grabbing { cursor: grabbing; }
+.map-roads {
+  position: absolute; top: 10px; right: 142px;
+  padding: 3px 8px; font-size: 11px; font-family: var(--mono);
+  background: var(--overlay); z-index: 2;
+}
+.map-roads.active { color: var(--accent); border-color: var(--accent); }
 .map-tilt {
   position: absolute; top: 10px; right: 98px;
   padding: 3px 8px; font-size: 11px; font-family: var(--mono);

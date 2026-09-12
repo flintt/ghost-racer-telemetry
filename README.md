@@ -46,6 +46,7 @@ go build -o ghost-racer-telemetry .   # Windows: GOOS=windows GOARCH=amd64 go bu
 | `-web` | 内嵌 | 从磁盘目录提供前端，改前端时不用重新编译 |
 | `-allow-delete` | `false` | 允许删除**游戏存档里**的记录。删之前先关掉 BeamNG，否则它会把内存里的清单再写回去 |
 | `-token` | 空 | 给 `/api/import` 加一个共享口令（`X-Ghost-Token` 头或 `?token=`） |
+| `-game` | 自动探测 | BeamNG **安装**目录（不是用户目录），用来读关卡里的道路几何 |
 
 ## 界面
 
@@ -54,6 +55,25 @@ go build -o ghost-racer-telemetry .   # Windows: GOOS=windows GOARCH=amd64 go bu
 - **轨迹图**：俯视轨迹，着色可切换速度、油门/刹车、档位、横向 G、Δt 对比或按记录配色。起点门画成绿色虚线，终点门（点对点）画成黄色。
 - **曲线区**：速度、Δt、油门/刹车、横向 G、纵向加速度、档位、**海拔、坡度**。鼠标在轨迹图或任意曲线上移动，所有图共用一个游标，顶部读数栏同步显示每条记录在该位置的数值。
 - **汇总表**：圈速、距离、最高/平均/最低速、最大加减速、最大横向 G、全油门/刹车/滑行占比、爬升、**最陡上坡/下坡**、采样点数、车型。
+
+### 赛道路面
+
+点轨迹图右上角的 `RD`，会把**游戏关卡里真实的道路**画在轨迹下面——灰色路面加边界线，一眼看出车在路上的位置、压没压线。
+
+道路直接从游戏安装目录的关卡存档里读：`content/levels/<level>.zip` 内的 `levels/<level>/main/MissionGroup/**/items.level.json`，按行的 JSON 对象，取其中的 `DecalRoad`：
+
+```jsonc
+{"class":"DecalRoad","material":"road_asphalt_2lane","drivability":1,
+ "nodes":[[x, y, z, width], ...]}
+```
+
+**每个节点自带宽度**，所以路沿是把中线沿法线偏移半个宽度算出来的真实边界，不是估的。坐标和遥测同一个世界系，直接叠。
+
+- 安装目录自动探测：读 Steam 的 `libraryfolders.vdf`，所以装在别的盘也能找到；也可以用 `-game` 手动指定
+- **`road_invisible` 的会被过滤掉**——那是 AI 导航用的隐形路网（east_coast_usa 里 3115 条 DecalRoad 有相当一部分是这种），画出来会糊掉真正的路面
+- 只取圈的包围盒附近的路（外扩 300 米），不会把整张地图的路都塞过来
+- 解析结果缓存在 `<data>/roads/<level>.json`，按存档大小和修改时间校验，游戏更新会自动重新解析；游戏卸载后缓存仍然可用
+- 900 MB 的关卡存档**不会被整个解压**，只读里面那些几十 KB 的 `items.level.json`
 
 **高度是被用起来的，不只是存着。** 每个采样点都有世界高度 `z`：距离按 **3D** 累加（爬坡段的里程不会被低估）；服务端从中导出**坡度通道**（%，按 10 米的行进距离取窗口——按采样点差分测到的是悬挂不是路面）；轨迹图可以按**海拔**或**坡度**着色；3D 倾斜视角下轨迹会**按真实高度抬起**，爬坡就是坡。相对高度做了 2.5× 的视觉放大，否则 2 公里的圈上几米落差只有一两个像素——高度数据是真的，强调是人为的。
 - **界面语言**中英文可切（首次按浏览器语言自动选），**主题**有自动 / 浅色 / 深色三档（自动跟随系统），选择记在浏览器里。
@@ -154,6 +174,7 @@ ghostReplays/freeRoam/<level>/<vehicleDir>/...                             2.9.8
 | `GET` | `/api/laps?lib=<key>` | 一个库里的所有圈（元数据） |
 | `GET` | `/api/lap?lib=<key>&id=<id>` | 单圈的完整通道和汇总 |
 | `DELETE` | `/api/lap?lib=<key>&id=<id>` | 删除一圈（受 `-allow-delete` 约束） |
+| `GET` | `/api/roads?level=<level>&minx=…&miny=…&maxx=…&maxy=…` | 该范围内的道路几何（`ai=1` 连隐形 AI 路网一起返回） |
 | `POST` | `/api/import` | 接收游戏内导出的记录，见 [`docs/import-api.md`](docs/import-api.md) |
 
 `lib` 的 key 形如 `game:freeRoam/east_coast_usa/starts/s001/ghostracer.save.json`，前缀是数据源（`game` / `import`）。

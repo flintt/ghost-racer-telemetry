@@ -52,6 +52,8 @@ const state = {
   // travel points up, the way a phone navigates.
   mapOrientation: 'north',
   mapTilt: false,
+  showRoads: false,
+  roads: null,
   mapHeading: 0,
   // `engaged` outlives `playing`: pausing should freeze the laps where they were,
   // not collapse them back onto one point.
@@ -98,6 +100,8 @@ const I18N = {
     selectHint: '右键或 Ctrl 拖动框选一段',
     orientHeading: '切换为行进方向朝上', orientNorth: '切换为正北朝上',
     tiltOn: '倾斜视角（3D）', tiltOff: '取消倾斜，回到俯视',
+    roadsOn: '显示赛道路面（从游戏关卡文件读取）', roadsOff: '隐藏赛道路面',
+    roadsUnavailable: '读不到赛道数据：',
     play: '播放所选区间', pause: '暂停', loop: '循环',
     selectionNone: '未选区间（播放整圈）',
     zoomHint: '滚轮缩放 · 拖动平移 · 双击还原',
@@ -176,6 +180,9 @@ const I18N = {
     selectHint: 'Right-drag or Ctrl-drag to select a stretch',
     orientHeading: 'Turn the map heading-up', orientNorth: 'Turn the map north-up',
     tiltOn: 'Tilt the view (3D)', tiltOff: 'Drop the tilt, look straight down',
+    roadsOn: 'Show the road surface, read from the game level files',
+    roadsOff: 'Hide the road surface',
+    roadsUnavailable: 'Road data unavailable:',
     play: 'Play the selected stretch', pause: 'Pause', loop: 'Loop',
     selectionNone: 'No selection (plays the whole lap)',
     zoomHint: 'Wheel to zoom · drag to pan · double-click to reset',
@@ -223,6 +230,7 @@ const THEME_STORAGE = 'ghostRacerWeb.theme'
 const PANEL_STORAGE = 'ghostRacerWeb.panels'
 const ORIENTATION_STORAGE = 'ghostRacerWeb.mapOrientation'
 const TILT_STORAGE = 'ghostRacerWeb.mapTilt'
+const ROADS_STORAGE = 'ghostRacerWeb.showRoads'
 
 function t(key, ...args) {
   const table = I18N[state.lang] || I18N.en
@@ -355,7 +363,7 @@ function themeColor(name) {
     const styles = getComputedStyle(document.documentElement)
     for (const key of ['--chart-grid', '--chart-text', '--chart-zero', '--chart-cursor',
       '--chart-cursor-pinned', '--chart-dot-ring', '--chart-reference-dim', '--trace-muted',
-      '--overlay', '--line', '--accent']) {
+      '--overlay', '--line', '--accent', '--road-fill', '--road-edge']) {
       themeColorCache[key] = styles.getPropertyValue(key).trim()
     }
   }
@@ -1568,6 +1576,81 @@ function ensureLayer(holder, width, height, ratio, key, paint) {
   return buffer
 }
 
+/* ----------------------------------------------------------------- roads */
+
+// ensureRoads pulls the road geometry around the laps being shown. The service
+// reads it out of the game's own level archive, so the width at every node is
+// the game's, and the edges drawn from it are the real ones.
+async function ensureRoads() {
+  if (!state.showRoads || !state.activeLibrary) return
+  const entries = loadedEntries()
+  if (!entries.length) return
+
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const entry of entries) {
+    const [x0, y0, x1, y1] = entry.lap.summary.bounds
+    minX = Math.min(minX, x0); minY = Math.min(minY, y0)
+    maxX = Math.max(maxX, x1); maxY = Math.max(maxY, y1)
+  }
+  const level = state.activeLibrary.level
+  const key = [level, minX.toFixed(0), minY.toFixed(0), maxX.toFixed(0), maxY.toFixed(0)].join(':')
+  if (state.roads && state.roads.key === key) return
+
+  const query = `level=${encodeURIComponent(level)}&minx=${minX.toFixed(1)}&miny=${minY.toFixed(1)}` +
+    `&maxx=${maxX.toFixed(1)}&maxy=${maxY.toFixed(1)}&margin=300`
+  try {
+    const payload = await api(`/api/roads?${query}`)
+    state.roads = { key, level, roads: payload.roads || [] }
+  } catch (error) {
+    // A missing game install is not a failure of the page; say so once and stop
+    // asking for this view.
+    state.roads = { key, level, roads: [], error: error.message }
+    toast(`${t('roadsUnavailable')} ${error.message}`, true)
+  }
+  scheduleRedraw()
+}
+
+// paintRoads fills each road between its edges, which are the centre line offset
+// by half the width recorded at every node.
+function paintRoads(context, projection) {
+  if (!state.showRoads || !state.roads || !state.roads.roads.length) return
+  const fill = themeColor('--road-fill')
+  const edge = themeColor('--road-edge')
+
+  for (const road of state.roads.roads) {
+    const nodes = road.nodes
+    if (!nodes || nodes.length < 2) continue
+    const left = []
+    const right = []
+    for (let i = 0; i < nodes.length; i += 1) {
+      const previous = nodes[Math.max(0, i - 1)]
+      const next = nodes[Math.min(nodes.length - 1, i + 1)]
+      const dx = next[0] - previous[0]
+      const dy = next[1] - previous[1]
+      const length = Math.hypot(dx, dy) || 1
+      const half = nodes[i][3] / 2
+      const nx = (-dy / length) * half
+      const ny = (dx / length) * half
+      left.push(projection.project(nodes[i][0] + nx, nodes[i][1] + ny, nodes[i][2]))
+      right.push(projection.project(nodes[i][0] - nx, nodes[i][1] - ny, nodes[i][2]))
+    }
+
+    context.beginPath()
+    context.moveTo(left[0][0], left[0][1])
+    for (let i = 1; i < left.length; i += 1) context.lineTo(left[i][0], left[i][1])
+    for (let i = right.length - 1; i >= 0; i -= 1) context.lineTo(right[i][0], right[i][1])
+    context.closePath()
+    context.fillStyle = fill
+    context.fill()
+    context.strokeStyle = edge
+    context.lineWidth = 1
+    context.stroke()
+  }
+}
+
 /* ------------------------------------------------------------- track map */
 
 const mapLayer = { canvas: null, key: '', width: 0, height: 0, ratio: 0 }
@@ -1827,6 +1910,14 @@ function setMapOrientation(mode) {
   scheduleRedraw()
 }
 
+function setShowRoads(on) {
+  state.showRoads = on
+  writeSetting(ROADS_STORAGE, on ? '1' : '0')
+  updateZoomControls()
+  ensureRoads()
+  scheduleRedraw()
+}
+
 function setMapTilt(on) {
   state.mapTilt = on
   writeSetting(TILT_STORAGE, on ? '1' : '0')
@@ -1852,6 +1943,10 @@ function updateZoomControls() {
   orient.textContent = headingUp ? '▲' : 'N'
   orient.classList.toggle('active', headingUp)
   orient.title = headingUp ? t('orientNorth') : t('orientHeading')
+
+  const roadsButton = el('mapRoads')
+  roadsButton.classList.toggle('active', state.showRoads)
+  roadsButton.title = state.showRoads ? t('roadsOff') : t('roadsOn')
 
   // Tilt only means anything once the map is facing the way the car is going.
   const tilt = el('mapTilt')
@@ -1906,11 +2001,12 @@ function drawMap() {
   // cached layer is keyed on the anchor as well. Quantizing keeps a jittering
   // last digit from forcing a repaint that changes nothing visible.
   const anchor = state.mapOrientation === 'heading' ? mapAnchor() : null
+  const roadsKey = state.showRoads && state.roads ? `r${state.roads.key}` : 'r0'
   const orientationKey = anchor
     ? `h${anchor.heading.toFixed(3)}:${anchor.x.toFixed(1)}:${anchor.y.toFixed(1)}:${state.mapTilt ? 't' : 'f'}`
     : 'n'
   const key = [width, height, state.colorMode, state.referenceKey, state.lang, effectiveTheme(),
-    view.scale.toFixed(3), view.panX.toFixed(1), view.panY.toFixed(1), orientationKey,
+    view.scale.toFixed(3), view.panX.toFixed(1), view.panY.toFixed(1), orientationKey, roadsKey,
     state.sectors ? state.sectors.signature : '', selectionSignature()].join('~')
   const scales = colorScales()
   if (mapLayer.key !== key || mapLayer.width !== width || mapLayer.height !== height || mapLayer.ratio !== ratio) {
@@ -1919,6 +2015,8 @@ function drawMap() {
     state.mapProjected = projectEntries(entries, projection)
   }
   const buffer = ensureLayer(mapLayer, width, height, ratio, key, (target) => {
+    // Roads first: the racing line belongs on top of the tarmac, not under it.
+    paintRoads(target, state.mapProjection)
     if (state.colorMode === 'sector') {
       // Everyone's line in grey first, then each lap's winning stretches on top:
       // otherwise the last lap drawn buries the ownership of the ones before it.
@@ -3126,6 +3224,7 @@ function attachMapZoom() {
   el('mapOrient').addEventListener('click', () =>
     setMapOrientation(state.mapOrientation === 'heading' ? 'north' : 'heading'))
   el('mapTilt').addEventListener('click', () => setMapTilt(!state.mapTilt))
+  el('mapRoads').addEventListener('click', () => setShowRoads(!state.showRoads))
 }
 
 // attachChartZoom: the charts share one X window, so zooming any of them zooms
@@ -3488,6 +3587,7 @@ function render() {
   buildCharts()
   renderSummary()
   updatePlaybackControls()
+  ensureRoads()
   writeHash()
   scheduleRedraw()
 }
@@ -3497,6 +3597,7 @@ function wire() {
   state.panels = loadPanels()
   state.mapOrientation = readSetting(ORIENTATION_STORAGE, 'north') === 'heading' ? 'heading' : 'north'
   state.mapTilt = readSetting(TILT_STORAGE, '0') === '1'
+  state.showRoads = readSetting(ROADS_STORAGE, '0') === '1'
   state.lang = detectLanguage()
   state.theme = readSetting(THEME_STORAGE, 'auto')
   applyTheme()

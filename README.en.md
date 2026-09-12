@@ -46,6 +46,7 @@ To point it somewhere else:
 | `-web` | embedded | Serve the UI from a directory instead of the embedded copy |
 | `-allow-delete` | `false` | Allow deleting laps from the **game** folder. Close BeamNG first, or it will write its in-memory manifest back |
 | `-token` | empty | Require a shared secret on `/api/import` (`X-Ghost-Token` header or `?token=`) |
+| `-game` | auto-detected | BeamNG **install** directory (not the user folder), for reading road geometry out of the level archives |
 
 ## The interface
 
@@ -54,6 +55,25 @@ To point it somewhere else:
 - **Track map**: the line from above, coloured by speed, throttle/brake, gear, lateral G, Δt or per recording. The start gate is a green dashed line, the finish gate (point to point) a yellow one.
 - **Charts**: speed, Δt, throttle/brake, lateral G, longitudinal acceleration, gear, **elevation and gradient**. Hovering the map or any chart moves one shared cursor, and the readout above the charts shows every selected recording's values at that point.
 - **Summary**: lap time, distance, top/average/minimum speed, peak acceleration and braking, peak lateral G, full-throttle/braking/coasting share, climb, **steepest climb and descent**, sample count and vehicle.
+
+### The road itself
+
+`RD` in the map's corner draws **the actual roads from the game's level files** underneath the racing line — surface and edges — so where the car sat on the road, and whether it went over a kerb, is visible rather than inferred.
+
+Roads are read straight out of the installed level archive: `content/levels/<level>.zip`, and inside it the newline-delimited objects of `levels/<level>/main/MissionGroup/**/items.level.json`, keeping the `DecalRoad` ones:
+
+```jsonc
+{"class":"DecalRoad","material":"road_asphalt_2lane","drivability":1,
+ "nodes":[[x, y, z, width], ...]}
+```
+
+**Every node carries its own width**, so the edges are the centre line offset by half of that — a real boundary, not an estimate. The coordinates share the telemetry's world space, so the two simply overlay.
+
+- The install is found through Steam's `libraryfolders.vdf`, so a second drive works; `-game` overrides it.
+- **`road_invisible` roads are filtered out** — that is the AI navigation network (a good share of east_coast_usa's 3115 DecalRoads), and drawing it would bury the real surface.
+- Only roads within the lap's bounding box (plus 300 m) are returned.
+- Extractions are cached in `<data>/roads/<level>.json`, keyed on the archive's size and timestamp, so a game update re-reads and an uninstalled game still shows its roads.
+- A 900 MB level archive is never fully unpacked: only the few tens of KB of `items.level.json` inside it are read.
 
 **Height is put to work, not just stored.** Every sample carries a world `z`: distance accumulates in **3D**, so a climb is not under-measured; the service derives a **gradient channel** (%, over a 10 m window of travel — differencing neighbouring samples measures the suspension, not the road); the map can be coloured by **elevation** or **gradient**; and the tilted 3D view **lifts the trace to its real height**, so a hill climb looks like one. Relief is exaggerated 2.5×, because a few metres over a 2 km lap would otherwise be a pixel or two — the height is honest, the emphasis is not.
 - **Language** switches between English and Chinese (picked from the browser on first visit), and the **theme** has auto / light / dark (auto follows the system). Both choices are remembered in the browser.
@@ -154,6 +174,7 @@ The original 1.6 object format (`{pos, dirFront, dirUp, speed}`, no timestamps) 
 | `GET` | `/api/laps?lib=<key>` | Every lap in one library (metadata only) |
 | `GET` | `/api/lap?lib=<key>&id=<id>` | One lap's full channels and summary |
 | `DELETE` | `/api/lap?lib=<key>&id=<id>` | Delete a lap (subject to `-allow-delete`) |
+| `GET` | `/api/roads?level=<level>&minx=…&miny=…&maxx=…&maxy=…` | Road geometry in that box (`ai=1` also returns the invisible AI network) |
 | `POST` | `/api/import` | Accept recordings exported from the game, see [`docs/import-api.md`](docs/import-api.md) |
 
 A `lib` key looks like `game:freeRoam/east_coast_usa/starts/s001/ghostracer.save.json`, prefixed by its source (`game` / `import`).

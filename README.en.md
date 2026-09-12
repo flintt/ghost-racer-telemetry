@@ -97,14 +97,18 @@ Switching between the distance and time axis clears the window, since a range in
 With two or more recordings selected, the *Sectors* tab cuts the shared route into 10 m cells, times every lap through each cell and gives the cell to whoever was quickest. Consecutive cells owned by one lap form a **stretch** — that lap's best piece of driving.
 
 - **Ideal lap**: the sum of the quickest time in every cell. Its gap to the actual quickest lap is how much is left on the table with the driving already on record.
-- **Sector table**: `range / quickest / sector time / lead over next / vs reference`, sorted by lead — the top row is the corner worth practising. Hovering previews it; **clicking the row makes that stretch the selection** (thickened on the map, shaded on the charts), and the ▶ at the end of the row selects it and plays it back. Finding where the time went and watching it happen are the same gesture.
+- **Sector table**: `range / quickest / rate / peak / total lead / vs reference`, **sorted by rate** — the top row is the corner worth practising. Hovering previews it; **clicking the row makes that stretch the selection** (thickened on the map, shaded on the charts), and the ▶ at the end of the row selects it and plays it back. Finding where the time went and watching it happen are the same gesture.
 - **Trace colour → Sector owner**: each lap keeps its colour where it owns the cell and goes grey elsewhere. The Δt chart carries the same ownership strip along its top edge.
 
 Three decisions worth knowing about:
 
 1. **Cells are measured along the reference lap's path, not along each lap's own travelled distance.** Own distance quietly penalises a wider line: after 500 m of its own travel a wide lap has not reached the reference's 500 m mark, yet that is where it gets compared. Measured on a line pushed 3 m wide, own travel came to 2306.3 m while the projection put it at 2289.7 m — exactly the reference's length, so 16.6 m of bias is what the projection removes.
 2. **Ownership is decided on time spent inside a cell, not cumulative time.** Cumulative time (the Δt curve itself) carries an early advantage all the way to the flag and makes one lap look quicker everywhere; only per-cell time answers "who was quicker through *here*". The slope of the Δt curve is the same information.
-3. **The flicker is filtered out.** A stretch shorter than three cells sandwiched between two stretches of one other lap is treated as noise and merged into it, and a stretch that leads the next lap by less than 0.02 s never reaches the table.
+3. **Ranking is by rate, not by total.** Total gain grows with length: a mild 770 m advantage adds up to 2.15 s while a fierce 430 m one adds up to only 1.43 s, yet the shorter one opens the gap **faster per 100 m** — that is where the difference is really made. The table therefore sorts on **rate** (seconds gained per 100 m) and also shows the **peak rate**, the steepest single cell, so a short burst hiding inside a long mild stretch still stands out. The total is kept alongside, because that is the number that reaches the lap time.
+
+4. **The flicker is filtered out.** A stretch shorter than three cells sandwiched between two stretches of one other lap is treated as noise and merged into it, and a stretch is dropped when its total lead is under 0.02 s **or** its rate is under 0.01 s/100 m — filtering on the total alone lets "long but flat" through while killing "short but fierce".
+
+Stretches are still cut by **ownership** (who was quickest), so one stretch can mix a fierce piece with a mild one; the peak-rate column is what exposes that.
 
 An abandoned fragment competes only in the cells it actually reached: it neither truncates the comparison nor takes part in the ideal-lap total. Recordings made with different cars all compete together, so use the vehicle filter when that matters.
 

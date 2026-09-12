@@ -101,8 +101,9 @@ const I18N = {
       `理论最佳 ${ideal} · 比最快圈快 ${gap} · 覆盖 ${coverage} m`,
     sectorsNeedTwo: '至少选两条记录才能做分段对比',
     sectorsNone: '没有足够显著的分段差异',
-    sectorRange: '区间 (m)', sectorOwner: '最快', sectorTime: '段用时 (s)',
-    sectorGain: '领先次快 (s)', sectorVsRef: '相对参照圈 (s)',
+    sectorRange: '区间 (m)', sectorOwner: '最快',
+    sectorRate: '速率 (s/100m)', sectorPeak: '峰值 (s/100m)',
+    sectorGain: '累计领先 (s)', sectorVsRef: '相对参照圈 (s)',
     sectorPlay: '选中这一段并播放',
     lapListEmptyFiltered: '当前筛选下没有记录',
     lapListEmpty: '这个库里还没有记录',
@@ -173,8 +174,9 @@ const I18N = {
       `Ideal lap ${ideal} · ${gap} under the quickest · over ${coverage} m`,
     sectorsNeedTwo: 'Pick at least two recordings to compare sectors',
     sectorsNone: 'No sector difference worth reporting',
-    sectorRange: 'Range (m)', sectorOwner: 'Quickest', sectorTime: 'Sector time (s)',
-    sectorGain: 'Lead over next (s)', sectorVsRef: 'Vs reference (s)',
+    sectorRange: 'Range (m)', sectorOwner: 'Quickest',
+    sectorRate: 'Rate (s/100 m)', sectorPeak: 'Peak (s/100 m)',
+    sectorGain: 'Total lead (s)', sectorVsRef: 'Vs reference (s)',
     sectorPlay: 'Select this stretch and play it',
     lapListEmptyFiltered: 'No recording matches this filter',
     lapListEmpty: 'This library has no recordings yet',
@@ -962,6 +964,11 @@ function refreshDeltas() {
 const SECTOR_STEP = 10        // metres per cell
 const SECTOR_MIN_CELLS = 3    // a shorter run is noise, not a stretch
 const SECTOR_MIN_GAIN = 0.02  // seconds; below this a win is not worth reporting
+// Seconds per 100 m. A stretch is ranked by how FAST the gap opens, not by how
+// much it added up to: total gain grows with length, so a long mild advantage
+// would otherwise outrank the short corner where the difference was actually
+// made. This floor drops stretches that are merely long.
+const SECTOR_MIN_RATE = 0.01
 
 // stationAt refines a nearest sample to the nearest point on the two adjacent
 // path segments, so the station is continuous instead of quantised to samples.
@@ -1128,6 +1135,7 @@ function computeSectors() {
     let gain = 0
     let versusReference = 0
     let ownerTime = 0
+    let peakCellGain = 0
     for (let k = run.from; k < run.to; k += 1) {
       const winner = cellTimes[run.owner][k]
       ownerTime += winner
@@ -1139,19 +1147,33 @@ function computeSectors() {
         const spent = cellTimes[i][k]
         if (spent > 0 && spent < runnerUp) runnerUp = spent
       }
-      if (isFinite(runnerUp)) gain += runnerUp - winner
+      if (isFinite(runnerUp)) {
+        const cellGain = runnerUp - winner
+        gain += cellGain
+        if (cellGain > peakCellGain) peakCellGain = cellGain
+      }
     }
-    if (gain < SECTOR_MIN_GAIN) continue
+    const length = (run.to - run.from) * SECTOR_STEP
+    // Rates are seconds per 100 m: how quickly the gap opens, which is what
+    // makes one stretch better driven than another. The peak is the steepest
+    // single cell, so a short burst inside a long mild stretch still shows.
+    const rate = (gain / length) * 100
+    const peakRate = (peakCellGain / SECTOR_STEP) * 100
+    if (gain < SECTOR_MIN_GAIN || rate < SECTOR_MIN_RATE) continue
     runs.push({
       entry: entries[run.owner],
       from: run.from * SECTOR_STEP,
       to: run.to * SECTOR_STEP,
+      length,
       time: ownerTime,
       gain,
+      rate,
+      peakRate,
       versusReference
     })
   }
-  runs.sort((a, b) => b.gain - a.gain)
+  // Ranked by rate: the stretch where the gap opens fastest comes first.
+  runs.sort((a, b) => b.rate - a.rate)
 
   // Only a lap that covered the whole grid has a total worth comparing with the
   // ideal; a fragment's "total" is just the time of the part it ran.
@@ -1277,7 +1299,7 @@ function renderSectorTable(container) {
   const table = document.createElement('table')
   table.className = 'sector-table'
   const head = table.createTHead().insertRow()
-  for (const key of ['sectorRange', 'sectorOwner', 'sectorTime', 'sectorGain', 'sectorVsRef']) {
+  for (const key of ['sectorRange', 'sectorOwner', 'sectorRate', 'sectorPeak', 'sectorGain', 'sectorVsRef']) {
     const cell = document.createElement('th')
     cell.textContent = t(key)
     head.append(cell)
@@ -1288,7 +1310,9 @@ function renderSectorTable(container) {
   const reference = referenceLap()
   for (const run of sectors.runs) {
     const row = body.insertRow()
-    row.insertCell().textContent = `${run.from.toFixed(0)} – ${run.to.toFixed(0)}`
+    const range = row.insertCell()
+    range.textContent = `${run.from.toFixed(0)} – ${run.to.toFixed(0)}`
+    range.title = `${run.length.toFixed(0)} m · ${run.time.toFixed(3)} s`
 
     const owner = row.insertCell()
     const wrap = document.createElement('span')
@@ -1299,10 +1323,12 @@ function renderSectorTable(container) {
     wrap.append(swatch, document.createTextNode(run.entry.lap.label || run.entry.id))
     owner.append(wrap)
 
-    row.insertCell().textContent = run.time.toFixed(3)
+    const rate = row.insertCell()
+    rate.textContent = run.rate.toFixed(3)
+    rate.className = 'gain'
+    row.insertCell().textContent = run.peakRate.toFixed(3)
     const gain = row.insertCell()
     gain.textContent = run.gain.toFixed(3)
-    gain.className = 'gain'
     const versus = row.insertCell()
     versus.textContent = reference && lapKey(reference) === lapKey(run.entry)
       ? '—'

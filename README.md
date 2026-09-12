@@ -70,7 +70,8 @@ go build -o ghost-racer-telemetry .   # Windows: GOOS=windows GOARCH=amd64 go bu
 **每个节点自带宽度**，所以路沿是把中线沿法线偏移半个宽度算出来的真实边界，不是估的。坐标和遥测同一个世界系，直接叠。
 
 - 安装目录自动探测：读 Steam 的 `libraryfolders.vdf`，所以装在别的盘也能找到；也可以用 `-game` 手动指定
-- **`road_invisible` 的会被过滤掉**——那是 AI 导航用的隐形路网（east_coast_usa 里 3115 条 DecalRoad 有相当一部分是这种），画出来会糊掉真正的路面
+- **按 `drivability` 过滤，不按材质**。`DecalRoad` 不是"路"这个类——人行道、停车位标线、路缘、地面裂纹、建筑周围的水泥裙边全是 DecalRoad，全画出来是一张镇子的平面图而不是赛道。游戏自己的判据是 drivability：BeamNG 的地图制作指南让作者**复制一条路、把材质改成 `road_invisible`、drivability 设成 1**，路才会出现在游戏内 minimap 上——也就是说 **minimap 画的就是这层"故意隐形但可驾驶"的 AI 路网**。所以隐形材质是"这是真路"的标志，反而要保留；该丢的是那些画上去的装饰贴花。
+- `?visible=1` 可以反过来只要可见材质，`?mindriv=` 可以调阈值；`?stats=1` 会列出该关卡的材质分布（条数、节点数、可驾驶数、中位宽度），用来核对过滤规则
 - 只取圈的包围盒附近的路（外扩 300 米），不会把整张地图的路都塞过来
 - 解析结果缓存在 `<data>/roads/<level>.json`，按存档大小和修改时间校验，游戏更新会自动重新解析；游戏卸载后缓存仍然可用
 - 900 MB 的关卡存档**不会被整个解压**，只读里面那些几十 KB 的 `items.level.json`
@@ -174,7 +175,7 @@ ghostReplays/freeRoam/<level>/<vehicleDir>/...                             2.9.8
 | `GET` | `/api/laps?lib=<key>` | 一个库里的所有圈（元数据） |
 | `GET` | `/api/lap?lib=<key>&id=<id>` | 单圈的完整通道和汇总 |
 | `DELETE` | `/api/lap?lib=<key>&id=<id>` | 删除一圈（受 `-allow-delete` 约束） |
-| `GET` | `/api/roads?level=<level>&minx=…&miny=…&maxx=…&maxy=…` | 该范围内的道路几何（`ai=1` 连隐形 AI 路网一起返回） |
+| `GET` | `/api/roads?level=<level>&minx=…&miny=…&maxx=…&maxy=…` | 该范围内的道路几何（`stats=1` 材质分布 · `visible=1` 只要可见材质 · `mindriv=` 阈值） |
 | `POST` | `/api/import` | 接收游戏内导出的记录，见 [`docs/import-api.md`](docs/import-api.md) |
 
 `lib` 的 key 形如 `game:freeRoam/east_coast_usa/starts/s001/ghostracer.save.json`，前缀是数据源（`game` / `import`）。

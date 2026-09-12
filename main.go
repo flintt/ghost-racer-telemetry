@@ -36,6 +36,7 @@ type server struct {
 	allowDelete bool
 	token       string
 	gameInstall string
+	userFolder  string
 	roads       *roads.Store
 }
 
@@ -82,7 +83,9 @@ func main() {
 		allowDelete: *allowDelete,
 		token:       *token,
 		gameInstall: install,
-		roads:       roads.NewStore(filepath.Join(filepath.Dir(importRoot.Path), "roads")),
+		// Mod levels live in the user folder, one level above ghostReplays.
+		userFolder: userFolderOf(resolved),
+		roads:      roads.NewStore(filepath.Join(filepath.Dir(importRoot.Path), "roads")),
 	}
 	catalog := app.scanner.Scan()
 
@@ -306,6 +309,15 @@ func steamLibraries() []string {
 	return libraries
 }
 
+// userFolderOf turns the resolved ghostReplays path back into the BeamNG user
+// folder that contains it, which is also where mods are installed.
+func userFolderOf(replays string) string {
+	if replays == "" {
+		return ""
+	}
+	return filepath.Dir(replays)
+}
+
 func defaultDataDir() string {
 	base, err := os.UserConfigDir()
 	if err != nil || base == "" {
@@ -377,20 +389,36 @@ func (s *server) handleRoads(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusBadRequest, "missing level parameter")
 		return
 	}
-	extracted, err := s.roads.Load(s.gameInstall, level)
+	extracted, err := s.roads.Load(s.gameInstall, s.userFolder, level)
 	if err != nil {
 		writeError(writer, http.StatusNotFound, err.Error())
 		return
 	}
 
 	query := request.URL.Query()
+	// A level's material breakdown, for deciding what counts as a road.
+	if query.Get("stats") == "1" {
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"level":     extracted.Level,
+			"source":    extracted.Source,
+			"roads":     len(extracted.Roads),
+			"nodes":     extracted.NodeCount,
+			"materials": extracted.Materials(),
+		})
+		return
+	}
+
 	minX := floatParam(query.Get("minx"), extracted.Bounds[0])
 	minY := floatParam(query.Get("miny"), extracted.Bounds[1])
 	maxX := floatParam(query.Get("maxx"), extracted.Bounds[2])
 	maxY := floatParam(query.Get("maxy"), extracted.Bounds[3])
 	margin := floatParam(query.Get("margin"), 120)
-	clipped := extracted.Clip(minX-margin, minY-margin, maxX+margin, maxY+margin,
-		query.Get("ai") == "1")
+	filter := roads.DefaultFilter()
+	filter.VisibleOnly = query.Get("visible") == "1"
+	if raw := query.Get("mindriv"); raw != "" {
+		filter.MinDrivability = floatParam(raw, filter.MinDrivability)
+	}
+	clipped := extracted.Clip(minX-margin, minY-margin, maxX+margin, maxY+margin, filter)
 
 	nodes := 0
 	for _, road := range clipped {

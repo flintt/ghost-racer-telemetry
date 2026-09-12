@@ -54,11 +54,11 @@ const notARoad = `{"class":"TSStatic","shapeName":"tree.dae","position":[1,2,3]}
 func TestExtractReadsRoadsAndWidths(t *testing.T) {
 	root := writeArchive(t, visibleRoad, invisibleRoad, faraway, notARoad)
 	// The archive is named East_Coast_USA.zip while the level id is lowercase.
-	archive, err := FindArchive(root, "east_coast_usa")
+	source, err := Locate(root, "", "east_coast_usa")
 	if err != nil {
 		t.Fatal(err)
 	}
-	level, err := Extract(archive, "east_coast_usa")
+	level, err := Extract(source, "east_coast_usa")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,19 +87,23 @@ func TestExtractReadsRoadsAndWidths(t *testing.T) {
 
 func TestClipDropsDistantAndInvisibleRoads(t *testing.T) {
 	root := writeArchive(t, visibleRoad, invisibleRoad, faraway, notARoad)
-	archive, _ := FindArchive(root, "east_coast_usa")
-	level, err := Extract(archive, "east_coast_usa")
+	source, _ := Locate(root, "", "east_coast_usa")
+	level, err := Extract(source, "east_coast_usa")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	near := level.Clip(-50, -50, 250, 100, false)
-	if len(near) != 1 || near[0].Material != "road_asphalt_2lane" {
-		t.Fatalf("clip returned %d roads: %+v", len(near), near)
+	// The drivable AI layer is the road network the game's own minimap draws, so
+	// it is kept; the box is what excludes the distant road.
+	near := level.Clip(-50, -50, 250, 600, DefaultFilter())
+	if len(near) != 2 {
+		t.Fatalf("clip returned %d roads, want the asphalt and the AI layer: %+v", len(near), near)
 	}
-	withAI := level.Clip(-50, -50, 250, 600, true)
-	if len(withAI) != 2 {
-		t.Errorf("including the AI network should give 2 roads, got %d", len(withAI))
+	visibleOnly := DefaultFilter()
+	visibleOnly.VisibleOnly = true
+	painted := level.Clip(-50, -50, 250, 600, visibleOnly)
+	if len(painted) != 1 || painted[0].Material != "road_asphalt_2lane" {
+		t.Errorf("visible-only should leave the rendered road alone: %+v", painted)
 	}
 }
 
@@ -108,7 +112,7 @@ func TestStoreCachesExtraction(t *testing.T) {
 	cache := t.TempDir()
 	store := NewStore(cache)
 
-	first, err := store.Load(root, "east_coast_usa")
+	first, err := store.Load(root, "", "east_coast_usa")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +127,7 @@ func TestStoreCachesExtraction(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "content", "levels", "East_Coast_USA.zip")); err != nil {
 		t.Fatal(err)
 	}
-	again, err := NewStore(cache).Load(root, "east_coast_usa")
+	again, err := NewStore(cache).Load(root, "", "east_coast_usa")
 	if err != nil {
 		t.Fatalf("cache should answer without the archive: %v", err)
 	}

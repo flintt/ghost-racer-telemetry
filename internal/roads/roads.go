@@ -22,9 +22,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -59,54 +61,178 @@ type item struct {
 	Nodes       json.RawMessage `json:"nodes"`
 }
 
-// FindArchive locates a level archive, tolerating the case differences between
-// a level's id and its file name (east_coast_usa.zip, but Cliff.zip).
-func FindArchive(gameRoot, level string) (string, error) {
-	dir := filepath.Join(gameRoot, "content", "levels")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", dir, err)
-	}
-	want := strings.ToLower(level) + ".zip"
-	for _, entry := range entries {
-		if strings.ToLower(entry.Name()) == want {
-			return filepath.Join(dir, entry.Name()), nil
-		}
-	}
-	return "", fmt.Errorf("no archive for level %q under %s", level, dir)
+// Source is one place a level's objects can be read from: an archive, or an
+// unpacked directory. Mods ship both ways.
+type Source struct {
+	Description string
+	files       []itemsFile
+	closer      func() error
 }
 
-// Extract reads every road out of a level archive. Only the small
-// items.level.json entries are decompressed; the textures and meshes that make
-// up most of a 900 MB archive are never touched.
-func Extract(archivePath, level string) (*Level, error) {
-	reader, err := zip.OpenReader(archivePath)
-	if err != nil {
-		return nil, err
+type itemsFile struct {
+	name string
+	open func() (io.ReadCloser, error)
+}
+
+// Locate finds a level. Official levels are archives under the install's
+// content/levels; mods live in the user folder, either as archives under mods/
+// or unpacked into a directory, and a mod archive holds its level under the
+// same levels/<name>/ prefix as an official one.
+func Locate(gameRoot, userRoot, level string) (*Source, error) {
+	tried := []string{}
+
+	if gameRoot != "" {
+		dir := filepath.Join(gameRoot, "content", "levels")
+		tried = append(tried, dir)
+		if source := findInDirectory(dir, level, false); source != nil {
+			return source, nil
+		}
 	}
-	defer reader.Close()
+	if userRoot != "" {
+		// Mod archives sit directly in mods/ and in its subfolders (repo/ holds
+		// everything installed from the repository).
+		mods := filepath.Join(userRoot, "mods")
+		tried = append(tried, mods)
+		if source := findInDirectory(mods, level, true); source != nil {
+			return source, nil
+		}
+	}
+	return nil, fmt.Errorf("no level %q under %s", level, strings.Join(tried, ", "))
+}
+
+// findInDirectory looks for an archive or an unpacked tree holding the level.
+func findInDirectory(dir, level string, recurse bool) *Source {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	want := strings.ToLower(level)
+
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			// content/levels/<level>/ or mods/unpacked/<mod>/levels/<level>/
+			if strings.ToLower(entry.Name()) == want {
+				if source := openDirectory(path, want); source != nil {
+					return source
+				}
+			}
+			if source := openDirectory(filepath.Join(path, "levels", entry.Name()), want); source != nil {
+				return source
+			}
+			if unpacked := findUnpackedLevel(path, want); unpacked != nil {
+				return unpacked
+			}
+			if recurse {
+				if source := findInDirectory(path, level, false); source != nil {
+					return source
+				}
+			}
+			continue
+		}
+		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".zip") {
+			continue
+		}
+		if source := openArchive(path, want); source != nil {
+			return source
+		}
+	}
+	return nil
+}
+
+func findUnpackedLevel(modDir, level string) *Source {
+	return openDirectory(filepath.Join(modDir, "levels", level), level)
+}
+
+// levelPrefix is where a level's objects live inside an archive or a mod tree.
+func levelPrefix(level string) string {
+	return "levels/" + level + "/"
+}
+
+func openArchive(path, level string) *Source {
+	reader, err := zip.OpenReader(path)
+	if err != nil {
+		return nil
+	}
+	prefix := levelPrefix(level)
+	source := &Source{Description: path, closer: reader.Close}
+	for _, file := range reader.File {
+		name := strings.ToLower(filepath.ToSlash(file.Name))
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, "items.level.json") {
+			continue
+		}
+		if file.UncompressedSize64 == 0 {
+			continue
+		}
+		entry := file
+		source.files = append(source.files, itemsFile{
+			name: file.Name,
+			open: func() (io.ReadCloser, error) { return entry.Open() },
+		})
+	}
+	if len(source.files) == 0 {
+		reader.Close()
+		return nil
+	}
+	return source
+}
+
+// openDirectory reads an unpacked level: the same layout, on disk.
+func openDirectory(root, level string) *Source {
+	stat, err := os.Stat(root)
+	if err != nil || !stat.IsDir() {
+		return nil
+	}
+	source := &Source{Description: root, closer: func() error { return nil }}
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return nil
+		}
+		if !strings.EqualFold(entry.Name(), "items.level.json") {
+			return nil
+		}
+		name := path
+		source.files = append(source.files, itemsFile{
+			name: name,
+			open: func() (io.ReadCloser, error) { return os.Open(name) },
+		})
+		return nil
+	})
+	_ = level
+	if len(source.files) == 0 {
+		return nil
+	}
+	return source
+}
+
+// Extract reads every road out of a located level. Only the small
+// items.level.json entries are read; the textures and meshes that make up most
+// of a 900 MB archive are never touched.
+func Extract(source *Source, level string) (*Level, error) {
+	defer func() {
+		if source.closer != nil {
+			_ = source.closer()
+		}
+	}()
 
 	result := &Level{
 		Level:  level,
-		Source: archivePath,
+		Source: source.Description,
 		Bounds: [4]float64{math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)},
 	}
-	for _, file := range reader.File {
-		if !strings.HasSuffix(file.Name, "items.level.json") || file.UncompressedSize64 == 0 {
-			continue
-		}
+	for _, file := range source.files {
 		if err := readItems(file, result); err != nil {
-			return nil, fmt.Errorf("%s: %w", file.Name, err)
+			return nil, fmt.Errorf("%s: %w", file.name, err)
 		}
 	}
 	if len(result.Roads) == 0 {
-		return nil, fmt.Errorf("no roads found in %s", archivePath)
+		return nil, fmt.Errorf("no roads found in %s", source.Description)
 	}
 	return result, nil
 }
 
-func readItems(file *zip.File, into *Level) error {
-	stream, err := file.Open()
+func readItems(file itemsFile, into *Level) error {
+	stream, err := file.open()
 	if err != nil {
 		return err
 	}
@@ -179,12 +305,90 @@ func buildRoad(parsed *item) *Road {
 	return road
 }
 
+// Filter says which roads to keep.
+//
+// DecalRoad is not a road class: BeamNG uses it for every ground decal there
+// is — pavements, parking bays, kerbs, cracks, the concrete skirt around a
+// building. Keeping everything draws a floor plan of the town, not a track.
+//
+// Drivability is the criterion the game itself uses. BeamNG's own map-making
+// guide has level authors duplicate a road, set its material to road_invisible
+// and its drivability to 1 to make it appear on the in-game minimap: the
+// network the minimap draws IS the drivable, deliberately invisible AI layer.
+// So an invisible material is a sign of a real road here, not a reason to drop
+// one, and the painted decals are the things to leave out.
+type Filter struct {
+	// MinDrivability keeps only surfaces the game considers drivable. Decals
+	// that are only paint or dirt carry no drivability at all.
+	MinDrivability float64
+	// VisibleOnly drops the invisible AI layer and keeps the rendered decals,
+	// which is rarely what a map wants — see above.
+	VisibleOnly bool
+}
+
+// DefaultFilter is what the map asks for: whatever the game will drive on.
+func DefaultFilter() Filter {
+	return Filter{MinDrivability: 0.01}
+}
+
+// Materials counts what a level is actually made of, so a filter can be chosen
+// from evidence instead of guesswork.
+type MaterialStat struct {
+	Material       string  `json:"material"`
+	Group          string  `json:"group"`
+	Roads          int     `json:"roads"`
+	Nodes          int     `json:"nodes"`
+	Drivable       int     `json:"drivable"`
+	MaxDrivability float64 `json:"maxDrivability"`
+	MedianWidth    float64 `json:"medianWidth"`
+}
+
+func (level *Level) Materials() []MaterialStat {
+	type bucket struct {
+		stat   MaterialStat
+		widths []float64
+	}
+	buckets := map[string]*bucket{}
+	for _, road := range level.Roads {
+		key := road.Material + "\x00" + road.Group
+		entry := buckets[key]
+		if entry == nil {
+			entry = &bucket{stat: MaterialStat{Material: road.Material, Group: road.Group}}
+			buckets[key] = entry
+		}
+		entry.stat.Roads++
+		entry.stat.Nodes += len(road.Nodes)
+		if road.Drivability > 0 {
+			entry.stat.Drivable++
+		}
+		if road.Drivability > entry.stat.MaxDrivability {
+			entry.stat.MaxDrivability = road.Drivability
+		}
+		for _, node := range road.Nodes {
+			entry.widths = append(entry.widths, node[3])
+		}
+	}
+	out := make([]MaterialStat, 0, len(buckets))
+	for _, entry := range buckets {
+		sort.Float64s(entry.widths)
+		if len(entry.widths) > 0 {
+			entry.stat.MedianWidth = entry.widths[len(entry.widths)/2]
+		}
+		out = append(out, entry.stat)
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Nodes > out[b].Nodes })
+	return out
+}
+
 // Clip returns the roads overlapping a box, which is how a lap asks for just
 // the roads it was driven on instead of a whole county.
-func (level *Level) Clip(minX, minY, maxX, maxY float64, includeInvisible bool) []*Road {
+func (level *Level) Clip(minX, minY, maxX, maxY float64, filter Filter) []*Road {
 	out := make([]*Road, 0, 64)
 	for _, road := range level.Roads {
-		if road.Invisible && !includeInvisible {
+		if filter.VisibleOnly && road.Invisible {
+			continue
+		}
+		if road.Drivability < filter.MinDrivability {
 			continue
 		}
 		if road.Bounds[0] > maxX || road.Bounds[2] < minX ||

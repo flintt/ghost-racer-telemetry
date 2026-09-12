@@ -40,9 +40,9 @@ func NewStore(dir string) *Store {
 }
 
 // Load returns a level's roads, extracting them the first time and reusing the
-// cache afterwards. The cache is keyed on the archive's size and timestamp, so a
-// game update re-extracts on its own.
-func (s *Store) Load(gameRoot, level string) (*Level, error) {
+// cache afterwards. The cache is keyed on the source's size and timestamp, so a
+// game or mod update re-extracts on its own.
+func (s *Store) Load(gameRoot, userRoot, level string) (*Level, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if hit, ok := s.cached[level]; ok {
@@ -52,9 +52,9 @@ func (s *Store) Load(gameRoot, level string) (*Level, error) {
 	cachePath := filepath.Join(s.dir, level+".json")
 	cached := readCache(cachePath)
 
-	archive, err := FindArchive(gameRoot, level)
+	source, err := Locate(gameRoot, userRoot, level)
 	if err != nil {
-		// No game install reachable: an extraction from an earlier run is still
+		// Nothing reachable to read: an extraction from an earlier run is still
 		// perfectly good road geometry.
 		if cached != nil {
 			s.cached[level] = cached.Level
@@ -62,20 +62,16 @@ func (s *Store) Load(gameRoot, level string) (*Level, error) {
 		}
 		return nil, err
 	}
-	stat, err := os.Stat(archive)
-	if err != nil {
-		if cached != nil {
-			s.cached[level] = cached.Level
-			return cached.Level, nil
+	size, stamp := fingerprint(source.Description)
+	if cached != nil && cached.ArchiveSize == size && cached.ArchiveTime.Equal(stamp) {
+		if source.closer != nil {
+			_ = source.closer()
 		}
-		return nil, err
-	}
-	if cached != nil && cached.ArchiveSize == stat.Size() && cached.ArchiveTime.Equal(stat.ModTime()) {
 		s.cached[level] = cached.Level
 		return cached.Level, nil
 	}
 
-	extracted, err := Extract(archive, level)
+	extracted, err := Extract(source, level)
 	if err != nil {
 		return nil, err
 	}
@@ -84,8 +80,8 @@ func (s *Store) Load(gameRoot, level string) (*Level, error) {
 	if err := os.MkdirAll(s.dir, 0o755); err == nil {
 		if data, marshalErr := json.Marshal(cacheFile{
 			Level:       extracted,
-			ArchiveSize: stat.Size(),
-			ArchiveTime: stat.ModTime(),
+			ArchiveSize: size,
+			ArchiveTime: stamp,
 		}); marshalErr == nil {
 			temp := cachePath + ".tmp"
 			if os.WriteFile(temp, data, 0o644) == nil {
@@ -94,4 +90,17 @@ func (s *Store) Load(gameRoot, level string) (*Level, error) {
 		}
 	}
 	return extracted, nil
+}
+
+// fingerprint identifies a source cheaply: an archive by its size and
+// timestamp, an unpacked directory by its own timestamp.
+func fingerprint(path string) (int64, time.Time) {
+	stat, err := os.Stat(path)
+	if err != nil {
+		return 0, time.Time{}
+	}
+	if stat.IsDir() {
+		return 0, stat.ModTime()
+	}
+	return stat.Size(), stat.ModTime()
 }

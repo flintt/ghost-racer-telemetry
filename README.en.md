@@ -70,7 +70,8 @@ Roads are read straight out of the installed level archive: `content/levels/<lev
 **Every node carries its own width**, so the edges are the centre line offset by half of that — a real boundary, not an estimate. The coordinates share the telemetry's world space, so the two simply overlay.
 
 - The install is found through Steam's `libraryfolders.vdf`, so a second drive works; `-game` overrides it.
-- **`road_invisible` roads are filtered out** — that is the AI navigation network (a good share of east_coast_usa's 3115 DecalRoads), and drawing it would bury the real surface.
+- **Filtering is on `drivability`, not on material.** DecalRoad is not a road class: pavements, parking bays, kerbs, cracks and the concrete skirt around a building are all DecalRoads, and keeping them draws a floor plan of the town instead of a track. Drivability is the game's own criterion — BeamNG's map-making guide has authors **duplicate a road, set its material to `road_invisible` and its drivability to 1** so that it shows up on the in-game minimap, which means **the minimap draws exactly that deliberately-invisible drivable layer**. An invisible material is therefore a sign of a real road, and the painted decals are the things to leave out.
+- `?visible=1` inverts it to rendered materials only, `?mindriv=` moves the threshold, and `?stats=1` lists a level's materials (road count, nodes, how many are drivable, median width) for checking the rule against a real level.
 - Only roads within the lap's bounding box (plus 300 m) are returned.
 - Extractions are cached in `<data>/roads/<level>.json`, keyed on the archive's size and timestamp, so a game update re-reads and an uninstalled game still shows its roads.
 - A 900 MB level archive is never fully unpacked: only the few tens of KB of `items.level.json` inside it are read.
@@ -174,7 +175,7 @@ The original 1.6 object format (`{pos, dirFront, dirUp, speed}`, no timestamps) 
 | `GET` | `/api/laps?lib=<key>` | Every lap in one library (metadata only) |
 | `GET` | `/api/lap?lib=<key>&id=<id>` | One lap's full channels and summary |
 | `DELETE` | `/api/lap?lib=<key>&id=<id>` | Delete a lap (subject to `-allow-delete`) |
-| `GET` | `/api/roads?level=<level>&minx=…&miny=…&maxx=…&maxy=…` | Road geometry in that box (`ai=1` also returns the invisible AI network) |
+| `GET` | `/api/roads?level=<level>&minx=…&miny=…&maxx=…&maxy=…` | Road geometry in that box (`stats=1` material breakdown · `visible=1` rendered materials only · `mindriv=` threshold) |
 | `POST` | `/api/import` | Accept recordings exported from the game, see [`docs/import-api.md`](docs/import-api.md) |
 
 A `lib` key looks like `game:freeRoam/east_coast_usa/starts/s001/ghostracer.save.json`, prefixed by its source (`game` / `import`).

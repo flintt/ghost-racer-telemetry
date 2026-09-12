@@ -40,8 +40,9 @@
   </aside>
 
   <section class="content">
-    <div class="lap-panel">
+    <div class="lap-panel" id="lapPanel">
       <div class="panel-head">
+        <button id="lapPanelToggle" class="panel-toggle" aria-expanded="true">▾</button>
         <h2 id="libraryTitle" data-i18n="pickStart">选择一个起点</h2>
         <div id="libraryMeta" class="muted"></div>
       </div>
@@ -88,6 +89,7 @@
       </div>
 
       <div class="summary-head">
+        <button id="summaryToggle" class="panel-toggle" aria-expanded="true">▾</button>
         <div class="chipset small" id="summaryTab">
           <button class="chip active" data-tab="metrics" data-i18n="tabMetrics">汇总</button>
           <button class="chip" data-tab="sectors" data-i18n="tabSectors">分段</button>

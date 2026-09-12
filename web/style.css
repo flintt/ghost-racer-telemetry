@@ -153,6 +153,9 @@ input[type="search"]:focus, .select:focus { outline: 1px solid var(--accent); bo
   display: flex; flex-direction: column; min-height: 0;
 }
 .content { display: grid; grid-template-rows: minmax(160px, 30%) 1fr; min-height: 0; min-width: 0; }
+/* Collapsed, the recording list keeps only its header and hands the room to
+   the analysis below it. */
+.content.laps-collapsed { grid-template-rows: auto 1fr; }
 
 .panel-head {
   display: flex; align-items: baseline; gap: 8px;
@@ -161,6 +164,11 @@ input[type="search"]:focus, .select:focus { outline: 1px solid var(--accent); bo
   flex: none;
 }
 .panel-head h2 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel-toggle {
+  background: none; border: 0; color: var(--text-dim); cursor: pointer;
+  font-size: 10px; line-height: 1; padding: 3px 4px; border-radius: 4px; flex: none;
+}
+.panel-toggle:hover { color: var(--accent); background: var(--bg-sunken); }
 
 /* ---------- library tree ---------- */
 .tree { overflow-y: auto; padding: 6px 6px 20px; flex: 1; }
@@ -202,6 +210,8 @@ input[type="search"]:focus, .select:focus { outline: 1px solid var(--accent); bo
 
 /* ---------- lap list ---------- */
 .lap-panel { display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--line); }
+.lap-panel.collapsed .filters,
+.lap-panel.collapsed .lap-list-wrap { display: none; }
 .filters { display: flex; gap: 8px; padding: 8px 14px; align-items: center; flex-wrap: wrap; flex: none; }
 .chipset { display: inline-flex; gap: 4px; background: var(--bg-sunken); padding: 3px; border-radius: 8px; border: 1px solid var(--line); }
 .chip {
@@ -300,6 +310,7 @@ input[type="search"]:focus, .select:focus { outline: 1px solid var(--accent); bo
 .summary td.gain { color: var(--good); }
 
 .summary { flex: none; max-height: 26%; overflow: auto; }
+.summary[hidden] { display: none; }
 .summary table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .summary th, .summary td { padding: 5px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line-soft); }
 .summary th:first-child, .summary td:first-child { text-align: left; }

@@ -32,6 +32,8 @@ const state = {
   lang: 'en',
   theme: 'auto',
   summaryTab: 'metrics',
+  // Expanded/collapsed per panel, remembered across reloads.
+  panels: { laps: true, summary: true },
   sectors: null,
   // Zoom state: an X window over the charts, a scale+pan over the map. Both are
   // view-only; nothing downstream of them recomputes lap data.
@@ -75,6 +77,7 @@ const I18N = {
     colorLatG: '横向 G', colorDelta: 'Δt 对比', colorPerLap: '按记录配色', colorSector: '分段归属',
     tabMetrics: '汇总', tabSectors: '分段',
     resetZoom: '1:1', resetRange: '全程 ·',
+    collapse: '折叠', expand: '展开',
     zoomHint: '滚轮缩放 · 拖动平移 · 双击还原',
     idealLap: (ideal, gap, coverage) =>
       `理论最佳 ${ideal} · 比最快圈快 ${gap} · 覆盖 ${coverage} m`,
@@ -139,6 +142,7 @@ const I18N = {
     colorSector: 'Sector owner',
     tabMetrics: 'Summary', tabSectors: 'Sectors',
     resetZoom: '1:1', resetRange: 'Full ·',
+    collapse: 'Collapse', expand: 'Expand',
     zoomHint: 'Wheel to zoom · drag to pan · double-click to reset',
     idealLap: (ideal, gap, coverage) =>
       `Ideal lap ${ideal} · ${gap} under the quickest · over ${coverage} m`,
@@ -175,6 +179,7 @@ const I18N = {
 
 const LANG_STORAGE = 'ghostRacerWeb.lang'
 const THEME_STORAGE = 'ghostRacerWeb.theme'
+const PANEL_STORAGE = 'ghostRacerWeb.panels'
 
 function t(key, ...args) {
   const table = I18N[state.lang] || I18N.en
@@ -217,6 +222,7 @@ function applyStaticText() {
   }
   el('map').title = t('zoomHint')
   updateZoomControls()
+  applyPanels()
   fillSelect(el('sortMode'), [
     ['lapTime', t('sortLapTime')], ['rank', t('sortRank')],
     ['id', t('sortId')], ['duration', t('sortDuration')]
@@ -249,6 +255,49 @@ function setLanguage(lang) {
   renderTree()
   if (state.activeLibrary) describeLibrary(state.activeLibrary)
   render()
+}
+
+/* ---------------------------------------------------------------- panels */
+
+function loadPanels() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(PANEL_STORAGE) || '{}')
+    return {
+      laps: stored.laps !== false,
+      summary: stored.summary !== false
+    }
+  } catch (error) {
+    return { laps: true, summary: true }
+  }
+}
+
+// applyPanels reflects the collapse state into the layout. The canvases size
+// themselves from their containers, so a redraw has to follow the reflow.
+function applyPanels() {
+  const content = document.querySelector('.content')
+  content.classList.toggle('laps-collapsed', !state.panels.laps)
+  el('lapPanel').classList.toggle('collapsed', !state.panels.laps)
+  el('summaryTable').hidden = !state.panels.summary
+
+  const lapToggle = el('lapPanelToggle')
+  lapToggle.textContent = state.panels.laps ? '▾' : '▸'
+  lapToggle.setAttribute('aria-expanded', String(state.panels.laps))
+  lapToggle.title = state.panels.laps ? t('collapse') : t('expand')
+
+  const summaryToggle = el('summaryToggle')
+  summaryToggle.textContent = state.panels.summary ? '▾' : '▸'
+  summaryToggle.setAttribute('aria-expanded', String(state.panels.summary))
+  summaryToggle.title = state.panels.summary ? t('collapse') : t('expand')
+
+  // Expanding has to refill the table: rendering is skipped while it is hidden.
+  renderSummary()
+  scheduleRedraw()
+}
+
+function togglePanel(name) {
+  state.panels[name] = !state.panels[name]
+  writeSetting(PANEL_STORAGE, JSON.stringify(state.panels))
+  applyPanels()
 }
 
 /* ----------------------------------------------------------------- theme */
@@ -1133,6 +1182,7 @@ function renderSummary() {
   for (const node of el('summaryTab').children) {
     node.classList.toggle('active', node.dataset.tab === state.summaryTab)
   }
+  if (!state.panels.summary) return
   if (state.summaryTab === 'sectors') {
     renderSectorTable(container)
     return
@@ -1383,17 +1433,32 @@ function selectionSignature() {
     .join('|')
 }
 
+// fitCanvas matches the backing store to the element's rendered size.
+//
+// The charts get an explicit height from their definition. The map must NOT:
+// writing an inline height onto it makes the card's height depend on the canvas
+// while the canvas reads its height from the card, and the pair locks at
+// whatever they measured first — collapsing a panel or resizing the window then
+// moves nothing. Its box comes from CSS (height: 100%) and is only measured here.
 function fitCanvas(canvas, cssHeight) {
   const ratio = window.devicePixelRatio || 1
-  const width = canvas.parentElement.clientWidth
-  const height = cssHeight || canvas.parentElement.clientHeight
+  let width
+  let height
+  if (cssHeight) {
+    canvas.style.height = `${cssHeight}px`
+    width = canvas.parentElement.clientWidth
+    height = cssHeight
+  } else {
+    const rect = canvas.getBoundingClientRect()
+    width = Math.max(1, Math.round(rect.width))
+    height = Math.max(1, Math.round(rect.height))
+  }
   const pixelWidth = Math.max(1, Math.round(width * ratio))
   const pixelHeight = Math.max(1, Math.round(height * ratio))
   if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
     canvas.width = pixelWidth
     canvas.height = pixelHeight
   }
-  canvas.style.height = `${height}px`
   const context = canvas.getContext('2d')
   context.setTransform(ratio, 0, 0, ratio, 0, 0)
   return { context, width, height, ratio }
@@ -2006,7 +2071,15 @@ function paintChart(context, chart, isLast) {
   // cost far less to rasterize; a lap can contribute thousands of joins.
   context.lineJoin = 'bevel'
   context.lineCap = 'butt'
+  // Clip to the plot: zoomed in, a series carries samples just outside the
+  // window so its line enters and leaves correctly, and a held value (the gear
+  // trace especially) would otherwise run out over the axis labels.
+  context.save()
+  context.beginPath()
+  context.rect(left, top, plotWidth, plotHeight)
+  context.clip()
   for (const item of series) paintSeries(context, item, chart)
+  context.restore()
   context.setLineDash([])
 }
 
@@ -2110,9 +2183,11 @@ function drawChartCursor(context, chart) {
   context.moveTo(x, top)
   context.lineTo(x, top + plotHeight)
   context.stroke()
-  void left
-  void plotWidth
 
+  context.save()
+  context.beginPath()
+  context.rect(left, top, plotWidth, plotHeight)
+  context.clip()
   for (const item of series) {
     const axis = axisValues(item.entry.lap)
     if (axis[axis.length - 1] < state.cursorX) continue
@@ -2123,6 +2198,7 @@ function drawChartCursor(context, chart) {
     context.arc(xAt(axis[index]), yAt(item.values[index]), 2.6, 0, Math.PI * 2)
     context.fill()
   }
+  context.restore()
 }
 
 function formatAxisValue(value) {
@@ -2498,6 +2574,7 @@ function render() {
 
 function wire() {
   state.collapsed = loadTreeState()
+  state.panels = loadPanels()
   state.lang = detectLanguage()
   state.theme = readSetting(THEME_STORAGE, 'auto')
   applyTheme()
@@ -2565,6 +2642,9 @@ function wire() {
     state.filters.sort = event.target.value
     renderLapList()
   })
+
+  el('lapPanelToggle').addEventListener('click', () => togglePanel('laps'))
+  el('summaryToggle').addEventListener('click', () => togglePanel('summary'))
 
   el('summaryTab').addEventListener('click', (event) => {
     const chip = event.target.closest('.chip')

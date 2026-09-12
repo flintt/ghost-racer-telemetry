@@ -20,6 +20,7 @@
   --chart-cursor: rgba(230, 237, 243, 0.4);
   --chart-dot-ring: rgba(10, 13, 18, 0.85);
   --chart-reference-dim: rgba(230, 237, 243, 0.45);
+  --trace-muted: rgba(139, 152, 169, 0.32);
   --radius: 10px;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
@@ -49,6 +50,7 @@
     --chart-cursor: rgba(22, 32, 43, 0.45);
     --chart-dot-ring: rgba(255, 255, 255, 0.9);
     --chart-reference-dim: rgba(22, 32, 43, 0.4);
+    --trace-muted: rgba(95, 108, 124, 0.28);
   }
 }
 
@@ -73,6 +75,7 @@
   --chart-cursor: rgba(22, 32, 43, 0.45);
   --chart-dot-ring: rgba(255, 255, 255, 0.9);
   --chart-reference-dim: rgba(22, 32, 43, 0.4);
+  --trace-muted: rgba(95, 108, 124, 0.28);
 }
 
 * { box-sizing: border-box; }
@@ -259,6 +262,7 @@ input[type="search"]:focus, .select:focus { outline: 1px solid var(--accent); bo
   display: flex; align-items: center; gap: 8px; pointer-events: none;
 }
 .legend .bar { width: 110px; height: 8px; border-radius: 4px; }
+.legend[hidden] { display: none; }
 .empty {
   position: absolute; inset: 0; display: grid; place-items: center;
   color: var(--text-dim); font-size: 12px; pointer-events: none;
@@ -277,7 +281,16 @@ input[type="search"]:focus, .select:focus { outline: 1px solid var(--accent); bo
 .chart canvas { width: 100%; display: block; }
 
 /* ---------- summary ---------- */
-.summary { flex: none; max-height: 26%; overflow: auto; border-top: 1px solid var(--line); }
+.summary-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 12px; border-top: 1px solid var(--line);
+  flex: none;
+}
+.summary-head .muted { font-family: var(--mono); font-size: 11px; }
+.sector-owner { display: inline-flex; align-items: center; gap: 6px; }
+.summary td.gain { color: var(--good); }
+
+.summary { flex: none; max-height: 26%; overflow: auto; }
 .summary table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .summary th, .summary td { padding: 5px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line-soft); }
 .summary th:first-child, .summary td:first-child { text-align: left; }

@@ -54,7 +54,10 @@ func main() {
 			complete := lap != start.laps || start.laps < 3
 			manual := lap == 2 && start.laps > 3
 			pace := 1.0 + 0.04*float64(lap-1) + 0.02*random.Float64()
-			samples, lapTime := generateLap(random, pace, complete, start.seed, *size)
+			// Each lap is stronger in different parts of the circuit, so the
+			// sector analysis has something real to find.
+			phase := float64(lap) * 1.7
+			samples, lapTime := generateLap(random, pace, complete, start.seed, *size, phase)
 
 			envelope := map[string]any{
 				"formatVersion":  2,
@@ -153,7 +156,7 @@ func sourceFor(manual, complete bool) string {
 
 // generateLap drives a closed circuit made of straights and corners, producing
 // plausible speed, throttle and brake traces at 50 Hz.
-func generateLap(random *rand.Rand, pace float64, complete bool, seed int64, size float64) ([][]float64, float64) {
+func generateLap(random *rand.Rand, pace float64, complete bool, seed int64, size float64, phase float64) ([][]float64, float64) {
 	const interval = 0.02
 	radiusX, radiusY := 220.0*size, 130.0*size
 	samples := [][]float64{}
@@ -165,6 +168,9 @@ func generateLap(random *rand.Rand, pace float64, complete bool, seed int64, siz
 		// Corner radius drives the speed target, as it would on track.
 		curvature := math.Abs(math.Sin(angle*2)) * 0.9
 		targetSpeed := (52 - 26*curvature) / pace
+		// A per-lap strength profile around the circuit: nobody is quickest
+		// everywhere.
+		targetSpeed *= 1 + 0.06*math.Sin(angle*2+phase)
 		wobble := 1 + 0.02*math.Sin(angle*7+float64(seed))
 		speed := targetSpeed * wobble
 

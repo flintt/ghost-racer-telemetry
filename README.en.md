@@ -56,6 +56,22 @@ To point it somewhere else:
 - **Summary**: lap time, distance, top/average/minimum speed, peak acceleration and braking, peak lateral G, full-throttle/braking/coasting share, climb, sample count and vehicle.
 - **Language** switches between English and Chinese (picked from the browser on first visit), and the **theme** has auto / light / dark (auto follows the system). Both choices are remembered in the browser.
 
+### Sector analysis (best stretches)
+
+With two or more recordings selected, the *Sectors* tab cuts the shared route into 10 m cells, times every lap through each cell and gives the cell to whoever was quickest. Consecutive cells owned by one lap form a **stretch** — that lap's best piece of driving.
+
+- **Ideal lap**: the sum of the quickest time in every cell. Its gap to the actual quickest lap is how much is left on the table with the driving already on record.
+- **Sector table**: `range / quickest / sector time / lead over next / vs reference`, sorted by lead — the top row is the corner worth practising. Hovering a row parks the cursor in the middle of that stretch on the map and every chart.
+- **Trace colour → Sector owner**: each lap keeps its colour where it owns the cell and goes grey elsewhere. The Δt chart carries the same ownership strip along its top edge.
+
+Three decisions worth knowing about:
+
+1. **Cells are measured along the reference lap's path, not along each lap's own travelled distance.** Own distance quietly penalises a wider line: after 500 m of its own travel a wide lap has not reached the reference's 500 m mark, yet that is where it gets compared. Measured on a line pushed 3 m wide, own travel came to 2306.3 m while the projection put it at 2289.7 m — exactly the reference's length, so 16.6 m of bias is what the projection removes.
+2. **Ownership is decided on time spent inside a cell, not cumulative time.** Cumulative time (the Δt curve itself) carries an early advantage all the way to the flag and makes one lap look quicker everywhere; only per-cell time answers "who was quicker through *here*". The slope of the Δt curve is the same information.
+3. **The flicker is filtered out.** A stretch shorter than three cells sandwiched between two stretches of one other lap is treated as noise and merged into it, and a stretch that leads the next lap by less than 0.02 s never reaches the table.
+
+An abandoned fragment competes only in the cells it actually reached: it neither truncates the comparison nor takes part in the ideal-lap total. Recordings made with different cars all compete together, so use the vehicle filter when that matters.
+
 **The X axis can be distance or time.** Distance is the default: comparing laps only means something when they are lined up by how far they have travelled from the start gate, which is how Δt is computed — the reference lap's time is interpolated to each sample's distance on this lap and subtracted. An abandoned run therefore simply ends where it stopped instead of skewing the comparison.
 
 The URL hash carries the current view (`#lib=…&laps=1,3&ref=1&axis=dist&color=speed`), so a specific comparison can be bookmarked or shared.

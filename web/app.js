@@ -30,7 +30,9 @@ const state = {
   charts: [],
   collapsed: new Map(),
   lang: 'en',
-  theme: 'auto'
+  theme: 'auto',
+  summaryTab: 'metrics',
+  sectors: null
 }
 
 /* ------------------------------------------------------------------ i18n */
@@ -64,7 +66,14 @@ const I18N = {
     allVehicles: '全部车型',
     sortLapTime: '按圈速', sortRank: '按名次', sortId: '按记录顺序', sortDuration: '按时长',
     colorSpeed: '速度', colorInputs: '油门/刹车', colorGear: '档位',
-    colorLatG: '横向 G', colorDelta: 'Δt 对比', colorPerLap: '按记录配色',
+    colorLatG: '横向 G', colorDelta: 'Δt 对比', colorPerLap: '按记录配色', colorSector: '分段归属',
+    tabMetrics: '汇总', tabSectors: '分段',
+    idealLap: (ideal, gap, coverage) =>
+      `理论最佳 ${ideal} · 比最快圈快 ${gap} · 覆盖 ${coverage} m`,
+    sectorsNeedTwo: '至少选两条记录才能做分段对比',
+    sectorsNone: '没有足够显著的分段差异',
+    sectorRange: '区间 (m)', sectorOwner: '最快', sectorTime: '段用时 (s)',
+    sectorGain: '领先次快 (s)', sectorVsRef: '相对参照圈 (s)',
     lapListEmptyFiltered: '当前筛选下没有记录',
     lapListEmpty: '这个库里还没有记录',
     exportCsvTitle: '导出 CSV', deleteTitle: '删除这条记录',
@@ -119,6 +128,14 @@ const I18N = {
     sortLapTime: 'By lap time', sortRank: 'By rank', sortId: 'By record order', sortDuration: 'By duration',
     colorSpeed: 'Speed', colorInputs: 'Throttle/brake', colorGear: 'Gear',
     colorLatG: 'Lateral G', colorDelta: 'Δt vs reference', colorPerLap: 'Per recording',
+    colorSector: 'Sector owner',
+    tabMetrics: 'Summary', tabSectors: 'Sectors',
+    idealLap: (ideal, gap, coverage) =>
+      `Ideal lap ${ideal} · ${gap} under the quickest · over ${coverage} m`,
+    sectorsNeedTwo: 'Pick at least two recordings to compare sectors',
+    sectorsNone: 'No sector difference worth reporting',
+    sectorRange: 'Range (m)', sectorOwner: 'Quickest', sectorTime: 'Sector time (s)',
+    sectorGain: 'Lead over next (s)', sectorVsRef: 'Vs reference (s)',
     lapListEmptyFiltered: 'No recording matches this filter',
     lapListEmpty: 'This library has no recordings yet',
     exportCsvTitle: 'Export CSV', deleteTitle: 'Delete this recording',
@@ -194,7 +211,8 @@ function applyStaticText() {
   ], state.filters.sort)
   fillSelect(el('colorMode'), [
     ['speed', t('colorSpeed')], ['throttle', t('colorInputs')], ['gear', t('colorGear')],
-    ['latg', t('colorLatG')], ['delta', t('colorDelta')], ['lap', t('colorPerLap')]
+    ['latg', t('colorLatG')], ['delta', t('colorDelta')], ['sector', t('colorSector')],
+    ['lap', t('colorPerLap')]
   ], state.colorMode)
   for (const node of el('langMode').children) {
     node.classList.toggle('active', node.dataset.lang === state.lang)
@@ -232,7 +250,7 @@ function themeColor(name) {
     themeColorCache = {}
     const styles = getComputedStyle(document.documentElement)
     for (const key of ['--chart-grid', '--chart-text', '--chart-zero', '--chart-cursor',
-      '--chart-dot-ring', '--chart-reference-dim']) {
+      '--chart-dot-ring', '--chart-reference-dim', '--trace-muted']) {
       themeColorCache[key] = styles.getPropertyValue(key).trim()
     }
   }
@@ -838,6 +856,244 @@ function refreshDeltas() {
   }
 }
 
+/* --------------------------------------------------------------- sectors */
+
+/*
+ * Micro-sector analysis: cut the shared route into fixed-length cells, time each
+ * lap through every cell, and give the cell to whoever was quickest. The runs of
+ * cells a lap owns are its best stretches, and summing the winning cell times
+ * gives the ideal lap.
+ *
+ * Cells are measured along the REFERENCE lap's path, not along each lap's own
+ * travelled distance. Own distance quietly penalises a wider line: after 500 m
+ * of its own travel a wide lap has not yet reached the reference's 500 m mark,
+ * so comparing there compares two different places on the track.
+ */
+
+const SECTOR_STEP = 10        // metres per cell
+const SECTOR_MIN_CELLS = 3    // a shorter run is noise, not a stretch
+const SECTOR_MIN_GAIN = 0.02  // seconds; below this a win is not worth reporting
+
+// stationAt refines a nearest sample to the nearest point on the two adjacent
+// path segments, so the station is continuous instead of quantised to samples.
+function stationAt(reference, index, px, py) {
+  let best = reference.dist[index]
+  let bestDistance = Infinity
+  for (const start of [index - 1, index]) {
+    if (start < 0 || start + 1 >= reference.x.length) continue
+    const ax = reference.x[start]
+    const ay = reference.y[start]
+    const vx = reference.x[start + 1] - ax
+    const vy = reference.y[start + 1] - ay
+    const lengthSq = vx * vx + vy * vy
+    if (lengthSq === 0) continue
+    let ratio = ((px - ax) * vx + (py - ay) * vy) / lengthSq
+    ratio = ratio < 0 ? 0 : ratio > 1 ? 1 : ratio
+    const dx = ax + vx * ratio - px
+    const dy = ay + vy * ratio - py
+    const distance = dx * dx + dy * dy
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = reference.dist[start] + (reference.dist[start + 1] - reference.dist[start]) * ratio
+    }
+  }
+  return best
+}
+
+// stationsFor projects every sample of one lap onto the reference path and
+// returns how far along that path each sample sits.
+function stationsFor(entry, reference) {
+  const own = entry.lap.channels
+  const path = reference.lap.channels
+  const total = own.x.length
+  const pathTotal = path.x.length
+  const stations = new Float64Array(total)
+  let cursor = 0
+
+  for (let i = 0; i < total; i += 1) {
+    const px = own.x[i]
+    const py = own.y[i]
+    let bestIndex = cursor
+    let bestDistance = Infinity
+    let from = Math.max(0, cursor - 4)
+    let to = Math.min(pathTotal - 1, cursor + 64)
+    for (;;) {
+      for (let k = from; k <= to; k += 1) {
+        const dx = path.x[k] - px
+        const dy = path.y[k] - py
+        const distance = dx * dx + dy * dy
+        if (distance < bestDistance) {
+          bestDistance = distance
+          bestIndex = k
+        }
+      }
+      // Widen while the best sits on the forward edge: a lap much slower than
+      // the reference walks the window forward faster than it advances.
+      if (bestIndex < to || to >= pathTotal - 1) break
+      from = to + 1
+      to = Math.min(pathTotal - 1, to + 256)
+    }
+    stations[i] = stationAt(path, bestIndex, px, py)
+    cursor = bestIndex
+  }
+
+  // A car that stops, spins or reverses would otherwise walk the station back.
+  for (let i = 1; i < total; i += 1) {
+    if (stations[i] < stations[i - 1]) stations[i] = stations[i - 1]
+  }
+  return stations
+}
+
+function ensureStations(entries, reference) {
+  const referenceKey = lapKey(reference)
+  for (const entry of entries) {
+    if (entry.stationsRef === referenceKey && entry.stations) continue
+    entry.stations = entry === reference
+      ? Float64Array.from(entry.lap.channels.dist)
+      : stationsFor(entry, reference)
+    entry.stationsRef = referenceKey
+  }
+}
+
+// collectRuns groups the cell ownership into maximal stretches and removes the
+// flicker: a stretch too short to be real, sandwiched between two stretches of
+// one other lap, belongs to that lap.
+function collectRuns(owner) {
+  const runs = []
+  let start = 0
+  for (let k = 1; k <= owner.length; k += 1) {
+    if (k === owner.length || owner[k] !== owner[start]) {
+      runs.push({ owner: owner[start], from: start, to: k })
+      start = k
+    }
+  }
+  for (let i = 1; i < runs.length - 1; i += 1) {
+    const run = runs[i]
+    if (run.to - run.from >= SECTOR_MIN_CELLS) continue
+    if (runs[i - 1].owner !== runs[i + 1].owner) continue
+    for (let k = run.from; k < run.to; k += 1) owner[k] = runs[i - 1].owner
+  }
+  const merged = []
+  start = 0
+  for (let k = 1; k <= owner.length; k += 1) {
+    if (k === owner.length || owner[k] !== owner[start]) {
+      merged.push({ owner: owner[start], from: start, to: k })
+      start = k
+    }
+  }
+  return merged
+}
+
+function computeSectors() {
+  state.sectors = null
+  const entries = loadedEntries()
+  const reference = referenceLap()
+  if (!reference || !reference.lap || entries.length < 2) return
+
+  ensureStations(entries, reference)
+
+  // The grid spans the furthest lap, not the shortest: an abandoned fragment
+  // should add information where it ran, not truncate the whole comparison.
+  const reach = entries.map((entry) => entry.stations[entry.stations.length - 1])
+  const cells = Math.floor(Math.max(...reach) / SECTOR_STEP)
+  if (cells < 4) return
+
+  // Time at every cell boundary, then the time spent inside each cell. Cell
+  // times are what decides ownership: cumulative time would carry an early
+  // advantage all the way to the flag.
+  const cellTimes = entries.map((entry) => {
+    const times = entry.lap.channels.t
+    const nodes = new Float64Array(cells + 1)
+    for (let k = 0; k <= cells; k += 1) {
+      nodes[k] = interpolate(entry.stations, times, k * SECTOR_STEP)
+    }
+    const spent = new Float64Array(cells)
+    for (let k = 0; k < cells; k += 1) spent[k] = nodes[k + 1] - nodes[k]
+    entry.sectorTotal = nodes[cells] - nodes[0]
+    entry.sectorReach = entry.stations[entry.stations.length - 1]
+    return spent
+  })
+
+  const owner = new Int16Array(cells).fill(-1)
+  let ideal = 0
+  for (let k = 0; k < cells; k += 1) {
+    let bestIndex = -1
+    let bestTime = Infinity
+    for (let i = 0; i < entries.length; i += 1) {
+      // A lap that ended earlier cannot win a cell it never reached.
+      if (reach[i] < (k + 1) * SECTOR_STEP) continue
+      const spent = cellTimes[i][k]
+      if (spent > 0 && spent < bestTime) {
+        bestTime = spent
+        bestIndex = i
+      }
+    }
+    owner[k] = bestIndex
+    if (bestIndex >= 0) ideal += bestTime
+  }
+
+  const referenceIndex = entries.indexOf(reference)
+  const runs = []
+  for (const run of collectRuns(owner)) {
+    if (run.owner < 0 || run.to - run.from < SECTOR_MIN_CELLS) continue
+    let gain = 0
+    let versusReference = 0
+    let ownerTime = 0
+    for (let k = run.from; k < run.to; k += 1) {
+      const winner = cellTimes[run.owner][k]
+      ownerTime += winner
+      if (referenceIndex >= 0) versusReference += cellTimes[referenceIndex][k] - winner
+      // "Worth" of a stretch is how much it beat the next quickest lap by.
+      let runnerUp = Infinity
+      for (let i = 0; i < entries.length; i += 1) {
+        if (i === run.owner || reach[i] < (k + 1) * SECTOR_STEP) continue
+        const spent = cellTimes[i][k]
+        if (spent > 0 && spent < runnerUp) runnerUp = spent
+      }
+      if (isFinite(runnerUp)) gain += runnerUp - winner
+    }
+    if (gain < SECTOR_MIN_GAIN) continue
+    runs.push({
+      entry: entries[run.owner],
+      from: run.from * SECTOR_STEP,
+      to: run.to * SECTOR_STEP,
+      time: ownerTime,
+      gain,
+      versusReference
+    })
+  }
+  runs.sort((a, b) => b.gain - a.gain)
+
+  // Only a lap that covered the whole grid has a total worth comparing with the
+  // ideal; a fragment's "total" is just the time of the part it ran.
+  const complete = entries.filter((entry) => entry.sectorReach >= cells * SECTOR_STEP)
+  const fastest = complete.reduce((best, entry) =>
+    (best === null || entry.sectorTotal < best.sectorTotal ? entry : best), null)
+
+  state.sectors = {
+    step: SECTOR_STEP,
+    cells,
+    owner,
+    runs,
+    ideal,
+    coverage: cells * SECTOR_STEP,
+    fastest,
+    fastestTime: fastest ? fastest.sectorTotal : null,
+    index: new Map(entries.map((entry, i) => [lapKey(entry), i])),
+    signature: `${lapKey(reference)}|${selectionSignature()}`
+  }
+}
+
+// sectorOwnsSample answers, for the track map, whether this lap owns the cell a
+// given sample falls in.
+function sectorOwnsSample(entry, index) {
+  const sectors = state.sectors
+  if (!sectors || !entry.stations) return false
+  const cell = Math.floor(entry.stations[index] / sectors.step)
+  if (cell < 0 || cell >= sectors.cells) return false
+  return sectors.owner[cell] === sectors.index.get(lapKey(entry))
+}
+
 /* --------------------------------------------------------------- summary */
 
 const SUMMARY_ROWS = [
@@ -861,6 +1117,15 @@ const SUMMARY_ROWS = [
 function renderSummary() {
   const container = el('summaryTable')
   container.textContent = ''
+  renderIdealLap()
+  for (const node of el('summaryTab').children) {
+    node.classList.toggle('active', node.dataset.tab === state.summaryTab)
+  }
+  if (state.summaryTab === 'sectors') {
+    renderSectorTable(container)
+    return
+  }
+
   const loaded = state.selected.filter((entry) => entry.lap)
   if (!loaded.length) return
 
@@ -881,6 +1146,79 @@ function renderSummary() {
     const row = body.insertRow()
     row.insertCell().textContent = t(definition.key)
     for (const entry of loaded) row.insertCell().textContent = definition.get(entry.lap)
+  }
+  container.append(table)
+}
+
+function renderIdealLap() {
+  const line = el('idealLap')
+  const sectors = state.sectors
+  if (!sectors || sectors.fastestTime == null) {
+    line.textContent = ''
+    return
+  }
+  line.textContent = t('idealLap',
+    formatTime(sectors.ideal),
+    formatDelta(sectors.ideal - sectors.fastestTime),
+    sectors.coverage.toFixed(0))
+}
+
+// The sector table answers "which corner should I go and practise": every
+// stretch a lap owned, worst gap first.
+function renderSectorTable(container) {
+  const sectors = state.sectors
+  if (!sectors) {
+    const hint = document.createElement('p')
+    hint.className = 'muted'
+    hint.style.padding = '10px 12px'
+    hint.textContent = t('sectorsNeedTwo')
+    container.append(hint)
+    return
+  }
+  if (!sectors.runs.length) {
+    const hint = document.createElement('p')
+    hint.className = 'muted'
+    hint.style.padding = '10px 12px'
+    hint.textContent = t('sectorsNone')
+    container.append(hint)
+    return
+  }
+
+  const table = document.createElement('table')
+  const head = table.createTHead().insertRow()
+  for (const key of ['sectorRange', 'sectorOwner', 'sectorTime', 'sectorGain', 'sectorVsRef']) {
+    const cell = document.createElement('th')
+    cell.textContent = t(key)
+    head.append(cell)
+  }
+
+  const body = table.createTBody()
+  const reference = referenceLap()
+  for (const run of sectors.runs) {
+    const row = body.insertRow()
+    row.insertCell().textContent = `${run.from.toFixed(0)} – ${run.to.toFixed(0)}`
+
+    const owner = row.insertCell()
+    const wrap = document.createElement('span')
+    wrap.className = 'sector-owner'
+    const swatch = document.createElement('span')
+    swatch.className = 'swatch'
+    swatch.style.background = run.entry.color
+    wrap.append(swatch, document.createTextNode(run.entry.lap.label || run.entry.id))
+    owner.append(wrap)
+
+    row.insertCell().textContent = run.time.toFixed(3)
+    const gain = row.insertCell()
+    gain.textContent = run.gain.toFixed(3)
+    gain.className = 'gain'
+    const versus = row.insertCell()
+    versus.textContent = reference && lapKey(reference) === lapKey(run.entry)
+      ? '—'
+      : formatDelta(-run.versusReference)
+    versus.className = run.versusReference >= 0 ? 'neg' : 'pos'
+
+    // Hovering a row parks the cursor in that stretch on every chart and the map.
+    row.addEventListener('mouseenter', () => setCursor((run.from + run.to) / 2))
   }
   container.append(table)
 }
@@ -1085,6 +1423,9 @@ function pointColorKey(entry, index, scales) {
       const rate = entry.delta[index] - (entry.delta[Math.max(0, index - 25)] || 0)
       return bucket(0.5 + rate / (2 * (scales.deltaRate || 0.05)))
     }
+    case 'sector':
+      // Own colour where this lap owns the cell, muted everywhere else.
+      return sectorOwnsSample(entry, index) ? 400 : 401
     default:
       return -1
   }
@@ -1092,6 +1433,8 @@ function pointColorKey(entry, index, scales) {
 
 function colorForKey(key, entry) {
   if (key < 0) return entry.color
+  if (key === 400) return entry.color
+  if (key === 401) return themeColor('--trace-muted')
   if (key === 300) return COAST_COLOR
   if (key >= 200) return palette(THROTTLE_RAMP)[key - 200]
   if (key >= 100) return palette(BRAKE_RAMP)[key - 100]
@@ -1147,7 +1490,7 @@ function drawMap() {
   }
 
   const key = [width, height, state.colorMode, state.referenceKey, state.lang, effectiveTheme(),
-    selectionSignature()].join('~')
+    state.sectors ? state.sectors.signature : '', selectionSignature()].join('~')
   const scales = colorScales()
   if (mapLayer.key !== key || mapLayer.width !== width || mapLayer.height !== height || mapLayer.ratio !== ratio) {
     const projection = mapProjection(entries, width, height)
@@ -1155,7 +1498,14 @@ function drawMap() {
     state.mapProjected = projectEntries(entries, projection)
   }
   const buffer = ensureLayer(mapLayer, width, height, ratio, key, (target) => {
-    for (const projected of state.mapProjected) paintTrace(target, projected, scales)
+    if (state.colorMode === 'sector') {
+      // Everyone's line in grey first, then each lap's winning stretches on top:
+      // otherwise the last lap drawn buries the ownership of the ones before it.
+      for (const projected of state.mapProjected) paintTrace(target, projected, scales, 'muted')
+      for (const projected of state.mapProjected) paintTrace(target, projected, scales, 'owned')
+    } else {
+      for (const projected of state.mapProjected) paintTrace(target, projected, scales)
+    }
     paintGates(target, state.mapProjection, entries)
   })
 
@@ -1164,20 +1514,29 @@ function drawMap() {
   renderLegend(scales)
 }
 
-function paintTrace(context, projected, scales) {
+function paintTrace(context, projected, scales, pass) {
   const { entry, points, total } = projected
   const reference = referenceLap()
   const isReference = reference && lapKey(reference) === lapKey(entry)
-  const flat = state.colorMode === 'lap' || (state.colorMode === 'delta' && isReference)
+  const flat = state.colorMode === 'lap' ||
+    (state.colorMode === 'delta' && isReference) ||
+    pass === 'muted'
 
-  context.lineWidth = isReference ? 2.6 : 1.9
+  context.lineWidth = pass === 'muted' ? 1.4 : (isReference ? 2.6 : 1.9)
   context.lineJoin = 'round'
   context.lineCap = 'round'
 
+  if (pass === 'owned') {
+    paintOwnedStretches(context, projected)
+    return
+  }
+
   if (flat) {
-    context.strokeStyle = state.colorMode === 'delta' && isReference
-      ? themeColor('--chart-reference-dim')
-      : entry.color
+    context.strokeStyle = pass === 'muted'
+      ? themeColor('--trace-muted')
+      : (state.colorMode === 'delta' && isReference
+        ? themeColor('--chart-reference-dim')
+        : entry.color)
     context.beginPath()
     context.moveTo(points[0], points[1])
     let lastX = points[0]
@@ -1221,6 +1580,30 @@ function paintTrace(context, projected, scales) {
     lastY = y
   }
   context.strokeStyle = colorForKey(runKey, entry)
+  context.stroke()
+}
+
+// paintOwnedStretches draws just the cells this lap was quickest through.
+function paintOwnedStretches(context, projected) {
+  const { entry, points, total } = projected
+  if (!state.sectors || !entry.stations) return
+  context.strokeStyle = entry.color
+  context.beginPath()
+  let drawing = false
+  for (let i = 0; i < total; i += 1) {
+    if (sectorOwnsSample(entry, i)) {
+      if (!drawing) {
+        context.moveTo(points[i * 2], points[i * 2 + 1])
+        drawing = true
+      } else {
+        context.lineTo(points[i * 2], points[i * 2 + 1])
+      }
+    } else if (drawing) {
+      // Carry one point past the boundary so neighbouring stretches meet.
+      context.lineTo(points[i * 2], points[i * 2 + 1])
+      drawing = false
+    }
+  }
   context.stroke()
 }
 
@@ -1283,10 +1666,12 @@ function renderLegend(scales) {
     latg: [`-${scales.latgMax.toFixed(1)} G`, `+${scales.latgMax.toFixed(1)} G`, DIVERGING],
     delta: [t('legendDeltaGain'), t('legendDeltaLoss'), DIVERGING],
     throttle: [t('legendBrake'), t('legendThrottle'), ['#ff2d2d', COAST_COLOR, '#3ddc97']],
+    sector: null,
     lap: null
   }
   const definition = labels[state.colorMode]
   const signature = definition ? `${state.lang}:${state.colorMode}:${definition[0]}:${definition[1]}` : 'none'
+  legend.hidden = !definition
   if (legend.dataset.signature === signature) return
   legend.dataset.signature = signature
   legend.textContent = ''
@@ -1382,7 +1767,9 @@ function drawChart(chart, entries, maxX, isLast) {
   context.clearRect(0, 0, width, height)
 
   // Only the Δt chart is drawn against the reference lap.
-  const reference = definition.id === 'delta' ? state.referenceKey : ''
+  const reference = definition.id === 'delta'
+    ? `${state.referenceKey}|${state.sectors ? state.sectors.signature : ''}`
+    : ''
   const key = [definition.id, width, height, state.axis, maxX, isLast, reference,
     state.lang, effectiveTheme(), selectionSignature()].join('~')
   if (chart.layer.key !== key || chart.layer.width !== width || chart.layer.height !== height) {
@@ -1486,6 +1873,8 @@ function paintChart(context, chart, isLast) {
     }
   }
 
+  if (definition.id === 'delta') paintSectorStrip(context, chart)
+
   context.lineWidth = 1.5
   // Bevel joins on a near-vertical envelope look identical to round ones and
   // cost far less to rasterize; a lap can contribute thousands of joins.
@@ -1493,6 +1882,23 @@ function paintChart(context, chart, isLast) {
   context.lineCap = 'butt'
   for (const item of series) paintSeries(context, item, chart)
   context.setLineDash([])
+}
+
+// paintSectorStrip marks who owned each stretch along the top of the Δt chart,
+// which is exactly where the reader is already looking for time gained or lost.
+function paintSectorStrip(context, chart) {
+  const sectors = state.sectors
+  if (!sectors || state.axis !== 'dist') return
+  const { left, top, plotWidth, maxX } = chart.geometry
+  const entries = loadedEntries()
+  for (let k = 0; k < sectors.cells; k += 1) {
+    const index = sectors.owner[k]
+    if (index < 0 || !entries[index]) continue
+    const from = left + ((k * sectors.step) / maxX) * plotWidth
+    const to = left + (((k + 1) * sectors.step) / maxX) * plotWidth
+    context.fillStyle = entries[index].color
+    context.fillRect(from, top - 6, Math.max(1, to - from), 4)
+  }
 }
 
 // paintSeries draws one channel. When a lap carries more samples than the plot
@@ -1774,6 +2180,7 @@ async function applyHash(request) {
 
 function render() {
   refreshDeltas()
+  computeSectors()
   for (const entry of state.selected) {
     if (entry.cache) delete entry.cache.delta
   }
@@ -1850,6 +2257,13 @@ function wire() {
   el('sortMode').addEventListener('change', (event) => {
     state.filters.sort = event.target.value
     renderLapList()
+  })
+
+  el('summaryTab').addEventListener('click', (event) => {
+    const chip = event.target.closest('.chip')
+    if (!chip) return
+    state.summaryTab = chip.dataset.tab
+    renderSummary()
   })
 
   el('colorMode').addEventListener('change', (event) => {

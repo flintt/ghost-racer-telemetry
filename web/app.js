@@ -53,7 +53,9 @@ const state = {
   mapOrientation: 'north',
   mapTilt: false,
   mapHeading: 0,
-  playback: { playing: false, speed: 1, loop: true, time: 0, handle: null }
+  // `engaged` outlives `playing`: pausing should freeze the laps where they were,
+  // not collapse them back onto one point.
+  playback: { playing: false, engaged: false, speed: 1, loop: true, time: 0, elapsed: 0, handle: null }
 }
 
 /* ------------------------------------------------------------------ i18n */
@@ -2195,8 +2197,9 @@ function drawGauges(context, width, height) {
   entries.forEach((entry, column) => {
     const channels = entry.lap.channels
     const values = axisValues(entry.lap)
-    const index = indexAt(values, state.cursorX)
-    const ended = index < 0 || values[values.length - 1] < state.cursorX
+    const own = lapCursorValue(entry)
+    const index = indexAt(values, own)
+    const ended = index < 0 || values[values.length - 1] < own
     const clusterLeft = boxLeft + column * clusterWidth + padding
     const top = boxTop + 8
 
@@ -2234,7 +2237,7 @@ function drawMapCursor(context) {
   if (state.cursorX == null || !state.mapProjected) return
   for (const { entry, points } of state.mapProjected) {
     const values = axisValues(entry.lap)
-    const index = indexAt(values, state.cursorX)
+    const index = indexAt(values, lapCursorValue(entry))
     if (index < 0) continue
     context.beginPath()
     context.arc(points[index * 2], points[index * 2 + 1], 4.5, 0, Math.PI * 2)
@@ -2629,8 +2632,9 @@ function drawChartCursor(context, chart) {
   context.clip()
   for (const item of series) {
     const axis = axisValues(item.entry.lap)
-    if (axis[axis.length - 1] < state.cursorX) continue
-    const index = indexAt(axis, state.cursorX)
+    const own = lapCursorValue(item.entry)
+    if (axis[axis.length - 1] < own) continue
+    const index = indexAt(axis, own)
     if (index < 0 || !isFinite(item.values[index])) continue
     context.fillStyle = item.color
     context.beginPath()
@@ -2738,6 +2742,14 @@ function timeToAxis(time) {
   return interpolate(reference.lap.channels.t, reference.lap.channels.dist, time)
 }
 
+// disengagePlayback drops the raced-apart positions and puts every lap back on
+// the same point of track, which is what the cursor means outside a replay.
+function disengagePlayback() {
+  if (!state.playback.engaged) return
+  state.playback.engaged = false
+  for (const entry of state.selected) entry.playbackStart = null
+}
+
 function setSelection(from, to) {
   const full = axisMax()
   const low = clamp(Math.min(from, to), 0, full)
@@ -2745,6 +2757,7 @@ function setSelection(from, to) {
   // A stray click should not leave a zero-width selection behind.
   state.selection = high - low < full / 500 ? null : { from: low, to: high }
   stopPlayback()
+  disengagePlayback()
   updatePlaybackControls()
   scheduleRedraw()
 }
@@ -2753,6 +2766,7 @@ function clearSelection() {
   state.selection = null
   state.selectedRunKey = null
   stopPlayback()
+  disengagePlayback()
   updatePlaybackControls()
   scheduleRedraw()
 }
@@ -2855,6 +2869,41 @@ function selectSectorRun(run, play) {
   }
 }
 
+// stretchEntryTime is when THIS lap reached the start of the stretch, on its own
+// clock. Laps cross a given point seconds apart, so a replay that puts them all
+// at the same distance shows them stacked on top of each other and hides the
+// very thing being compared.
+function stretchEntryTime(entry, from) {
+  const reference = referenceLap()
+  let station = from
+  if (state.axis === 'time') {
+    if (!reference || !reference.lap) return null
+    const referenceStations = reference.stations || reference.lap.channels.dist
+    station = interpolate(reference.lap.channels.t, referenceStations, from)
+  }
+  const stations = entry.stations || entry.lap.channels.dist
+  return interpolate(stations, entry.lap.channels.t, station)
+}
+
+// preparePlaybackStarts lines every lap up on the stretch's entry, so playback
+// releases them together and they separate exactly as they did on track.
+function preparePlaybackStarts() {
+  const from = state.selection ? state.selection.from : 0
+  for (const entry of loadedEntries()) {
+    entry.playbackStart = stretchEntryTime(entry, from)
+  }
+}
+
+// lapCursorValue is where one lap is right now. Scrubbing compares every lap at
+// the same point on track; playback races them from a common start instead.
+function lapCursorValue(entry) {
+  const playback = state.playback
+  if (!playback.engaged || entry.playbackStart == null) return state.cursorX
+  const time = entry.playbackStart + playback.elapsed
+  if (state.axis === 'time') return time
+  return interpolate(entry.lap.channels.t, entry.lap.channels.dist, time)
+}
+
 function playbackBounds() {
   const full = axisMax()
   const from = state.selection ? state.selection.from : 0
@@ -2880,6 +2929,9 @@ function startPlayback() {
   if (playback.time < bounds.startTime || playback.time >= bounds.endTime) {
     playback.time = bounds.startTime
   }
+  preparePlaybackStarts()
+  playback.engaged = true
+  playback.elapsed = playback.time - bounds.startTime
   let previous = performance.now()
   const step = (now) => {
     if (!playback.playing) return
@@ -2895,6 +2947,8 @@ function startPlayback() {
         updatePlaybackControls()
       }
     }
+    // Elapsed since the stretch opened, which is what every lap is driven from.
+    playback.elapsed = playback.time - current.startTime
     const value = timeToAxis(playback.time)
     if (value != null) {
       // Playback owns the cursor the same way a pin does: hover must not fight it.
@@ -3141,6 +3195,8 @@ function attachDragging() {
 function setCursor(value, options = {}) {
   const { source, pin } = options
   if (cursorLocked() && !pin) return
+  // Moving the cursor by hand is a return to comparing every lap at one point.
+  if (source) disengagePlayback()
   if (pin) state.cursorPinned = value != null
   if (state.cursorX === value) {
     if (pin) scheduleRedraw()
@@ -3280,9 +3336,10 @@ function renderReadout() {
   for (const entry of entries) {
     const channels = entry.lap.channels
     const values = axisValues(entry.lap)
-    const index = indexAt(values, state.cursorX)
+    const own = lapCursorValue(entry)
+    const index = indexAt(values, own)
     if (index < 0) continue
-    const beyond = values[values.length - 1] < state.cursorX
+    const beyond = values[values.length - 1] < own
     const span = document.createElement('span')
     const parts = [`<b style="color:${entry.color}">■</b>`]
     if (beyond) {

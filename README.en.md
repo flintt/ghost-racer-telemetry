@@ -67,7 +67,11 @@ The two panes zoom independently:
 
 **Right-drag** or **Ctrl-drag** selects a stretch: on a chart that is a range along the X axis, on the map it rubber-bands a box and the piece of track inside it becomes the range. The selection is shaded on the charts. On the map it is only **thickened, with a tick across the line at each end** — its colour is left alone, because whatever the colour mode is showing through that stretch is exactly what you selected it to look at.
 
-The transport in the bar plays it back: ▶ (space works too), ⟲ loop, 0.25×–4× speed, ✕ to clear. Playback runs on the reference lap's real clock and moves every selected recording at once — they run the stretch side by side. Hover cannot disturb the cursor while it plays, just as with a pin. With nothing selected it plays the whole lap.
+The transport in the bar plays it back: ▶ (space works too), ⟲ loop, 0.25×–4× speed, ✕ to clear. Hover cannot disturb the cursor while it plays, just as with a pin, and with nothing selected it plays the whole lap.
+
+**Playback is a real side-by-side run, not a stack.** Recordings cross the start of a stretch seconds apart — at the same 700 m point three laps arrived at 19.185, 19.932 and 20.603 s — so playback lines them up on that entry and then runs each on its own clock, and the quicker ones pull away. Nine seconds into the example above the fastest is 40 m up on the slowest. Pausing keeps them where they were rather than collapsing them together.
+
+**Scrubbing does the opposite**: every recording is read at the same point on track, which is the comparison you want when asking what each was doing *here*. Moving the cursor by hand switches back from racing to comparing.
 
 The **bottom-right of the map** carries in-game style vertical gauges: one cluster per recording with `T` throttle (green), `B` brake (red), `H` handbrake (amber), the current **gear** underneath, and the recording's colour along the top (up to four, and only recordings that carry driver inputs). The speed legend keeps the bottom-left corner where it was.
 

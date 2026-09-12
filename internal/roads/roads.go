@@ -47,11 +47,14 @@ type Road struct {
 
 // Level is every road extracted from one level.
 type Level struct {
-	Level     string     `json:"level"`
-	Source    string     `json:"source"`
-	Roads     []*Road    `json:"roads"`
-	Bounds    [4]float64 `json:"bounds"`
-	NodeCount int        `json:"nodeCount"`
+	Level  string `json:"level"`
+	Source string `json:"source"`
+	// Files says what was actually read, keyed by kind. Whether a level even has
+	// prefab files is otherwise impossible to tell from the outside.
+	Files     map[string]int `json:"files"`
+	Roads     []*Road        `json:"roads"`
+	Bounds    [4]float64     `json:"bounds"`
+	NodeCount int            `json:"nodeCount"`
 }
 
 // item is the shape we care about in an items.level.json line.
@@ -68,7 +71,11 @@ type item struct {
 type Source struct {
 	Description string
 	files       []itemsFile
-	closer      func() error
+	// prefabCandidates counts old-style .prefab files, which are Torque text and
+	// not JSON. If a level's bridges live in those, nothing here can read them
+	// and the count is what says so.
+	prefabCandidates int
+	closer           func() error
 }
 
 type itemsFile struct {
@@ -149,6 +156,14 @@ func findUnpackedLevel(modDir, level string) *Source {
 // carriesObjects says whether a file can hold level objects. Roads live in the
 // per-group items files, but a bridge is very often a prefab, whose objects sit
 // in a file of their own and would otherwise never be read.
+func fileKind(name string) string {
+	lower := strings.ToLower(name)
+	if strings.HasSuffix(lower, ".prefab.json") {
+		return "prefabJSON"
+	}
+	return "items"
+}
+
 func carriesObjects(lowerName string) bool {
 	return strings.HasSuffix(lowerName, "items.level.json") ||
 		strings.HasSuffix(lowerName, ".prefab.json")
@@ -168,7 +183,14 @@ func openArchive(path, level string) *Source {
 	source := &Source{Description: path, closer: reader.Close}
 	for _, file := range reader.File {
 		name := strings.ToLower(filepath.ToSlash(file.Name))
-		if !strings.HasPrefix(name, prefix) || !carriesObjects(name) {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		if strings.HasSuffix(name, ".prefab") {
+			source.prefabCandidates++
+			continue
+		}
+		if !carriesObjects(name) {
 			continue
 		}
 		if file.UncompressedSize64 == 0 {
@@ -228,13 +250,16 @@ func Extract(source *Source, level string) (*Level, error) {
 	result := &Level{
 		Level:  level,
 		Source: source.Description,
+		Files:  map[string]int{},
 		Bounds: [4]float64{math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)},
 	}
 	for _, file := range source.files {
+		result.Files[fileKind(file.name)]++
 		if err := readItems(file, result); err != nil {
 			return nil, fmt.Errorf("%s: %w", file.name, err)
 		}
 	}
+	result.Files["prefabObjects"] = source.prefabCandidates
 	if len(result.Roads) == 0 {
 		return nil, fmt.Errorf("no roads found in %s", source.Description)
 	}

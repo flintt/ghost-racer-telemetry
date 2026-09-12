@@ -11,26 +11,29 @@ import (
 // Store keeps extracted levels on disk. Walking a 900 MB archive takes a moment;
 // the roads inside it only change when the game is updated.
 type Store struct {
-	dir string
+	dir   string
+	build string
 
 	mu     sync.Mutex
 	cached map[string]*Level
 }
 
-// cacheFormat is bumped whenever extraction changes what it produces. Without
-// it a cache written by an older build survives — the archive has not changed,
-// after all — and the new parsing never runs. That is how MeshRoad bridges went
-// on missing after support for them was added.
-const cacheFormat = 2
+// cacheFormat is bumped when extraction changes what it produces. It is not
+// enough on its own: forgetting to bump it silently keeps an old parse alive,
+// which is exactly how MeshRoad bridges and then prefab roads both went on
+// missing after support for them was added. The build version is therefore part
+// of the key too, so a cache can never outlive the code that wrote it.
+const cacheFormat = 3
 
 type cacheFile struct {
 	Format      int       `json:"format"`
+	Build       string    `json:"build"`
 	Level       *Level    `json:"level"`
 	ArchiveSize int64     `json:"archiveSize"`
 	ArchiveTime time.Time `json:"archiveTime"`
 }
 
-func readCache(path string) *cacheFile {
+func readCache(path, build string) *cacheFile {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -39,14 +42,17 @@ func readCache(path string) *cacheFile {
 	if json.Unmarshal(data, &file) != nil || file.Level == nil {
 		return nil
 	}
-	if file.Format != cacheFormat {
+	if file.Format != cacheFormat || file.Build != build {
 		return nil
 	}
 	return &file
 }
 
-func NewStore(dir string) *Store {
-	return &Store{dir: dir, cached: map[string]*Level{}}
+// NewStore keys its cache on the build as well as the format, so an upgrade
+// always re-reads the level rather than trusting whatever the previous binary
+// understood.
+func NewStore(dir, build string) *Store {
+	return &Store{dir: dir, build: build, cached: map[string]*Level{}}
 }
 
 // Load returns a level's roads, extracting them the first time and reusing the
@@ -60,7 +66,7 @@ func (s *Store) Load(gameRoot, userRoot, level string) (*Level, error) {
 	}
 
 	cachePath := filepath.Join(s.dir, level+".json")
-	cached := readCache(cachePath)
+	cached := readCache(cachePath, s.build)
 
 	source, err := Locate(gameRoot, userRoot, level)
 	if err != nil {
@@ -90,6 +96,7 @@ func (s *Store) Load(gameRoot, userRoot, level string) (*Level, error) {
 	if err := os.MkdirAll(s.dir, 0o755); err == nil {
 		if data, marshalErr := json.Marshal(cacheFile{
 			Format:      cacheFormat,
+			Build:       s.build,
 			Level:       extracted,
 			ArchiveSize: size,
 			ArchiveTime: stamp,

@@ -136,7 +136,7 @@ func TestClipDropsDistantAndInvisibleRoads(t *testing.T) {
 func TestStoreCachesExtraction(t *testing.T) {
 	root := writeArchive(t, visibleRoad)
 	cache := t.TempDir()
-	store := NewStore(cache)
+	store := NewStore(cache, "test")
 
 	first, err := store.Load(root, "", "east_coast_usa")
 	if err != nil {
@@ -153,7 +153,7 @@ func TestStoreCachesExtraction(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "content", "levels", "East_Coast_USA.zip")); err != nil {
 		t.Fatal(err)
 	}
-	again, err := NewStore(cache).Load(root, "", "east_coast_usa")
+	again, err := NewStore(cache, "test").Load(root, "", "east_coast_usa")
 	if err != nil {
 		t.Fatalf("cache should answer without the archive: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestCacheIsInvalidatedWhenExtractionChanges(t *testing.T) {
 	root := writeArchive(t, visibleRoad, bridge)
 	cache := t.TempDir()
 
-	if _, err := NewStore(cache).Load(root, "", "east_coast_usa"); err != nil {
+	if _, err := NewStore(cache, "test").Load(root, "", "east_coast_usa"); err != nil {
 		t.Fatal(err)
 	}
 	// Rewrite the cache as an older build would have: valid, current archive
@@ -187,7 +187,7 @@ func TestCacheIsInvalidatedWhenExtractionChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	level, err := NewStore(cache).Load(root, "", "east_coast_usa")
+	level, err := NewStore(cache, "test").Load(root, "", "east_coast_usa")
 	if err != nil {
 		t.Fatal(err)
 	}

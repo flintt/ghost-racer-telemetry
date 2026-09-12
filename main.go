@@ -85,7 +85,7 @@ func main() {
 		gameInstall: install,
 		// Mod levels live in the user folder, one level above ghostReplays.
 		userFolder: userFolderOf(resolved),
-		roads:      roads.NewStore(filepath.Join(filepath.Dir(importRoot.Path), "roads")),
+		roads:      roads.NewStore(filepath.Join(filepath.Dir(importRoot.Path), "roads"), version),
 	}
 	catalog := app.scanner.Scan()
 
@@ -413,6 +413,7 @@ func (s *server) handleRoads(writer http.ResponseWriter, request *http.Request) 
 			"nodes":     extracted.NodeCount,
 			"drivable":  drivable,
 			"classes":   classes,
+			"files":     extracted.Files,
 			"materials": extracted.Materials(),
 		})
 		return

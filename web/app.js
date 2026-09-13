@@ -132,7 +132,7 @@ const I18N = {
     resetZoom: '1:1', resetRange: '全程 ·',
     collapse: '折叠', expand: '展开',
     pinned: '已锁定', pinRelease: '释放（Esc）', pinCentre: '把地图移到锁定点',
-    pinHint: '点击锁定游标 · 锁定后移到另一侧不会丢位置',
+    pinHint: '点击线条设定并锁定游标 · 悬停不会改变游标',
     selectHint: '右键或 Ctrl 拖动框选一段',
     orientHeading: '切换为行进方向朝上', orientNorth: '切换为正北朝上',
     tiltOn: '倾斜视角（3D）', tiltOff: '取消倾斜，回到俯视',
@@ -212,7 +212,7 @@ const I18N = {
     resetZoom: '1:1', resetRange: 'Full ·',
     collapse: 'Collapse', expand: 'Expand',
     pinned: 'Pinned', pinRelease: 'Release (Esc)', pinCentre: 'Bring the map to the pinned point',
-    pinHint: 'Click to pin the cursor · a pinned position survives moving to the other pane',
+    pinHint: 'Click a line to set and pin the cursor · hovering the map changes nothing',
     selectHint: 'Right-drag or Ctrl-drag to select a stretch',
     orientHeading: 'Turn the map heading-up', orientNorth: 'Turn the map north-up',
     tiltOn: 'Tilt the view (3D)', tiltOff: 'Drop the tilt, look straight down',
@@ -3116,10 +3116,12 @@ function attachCursor(canvas) {
   })
 }
 
-// How close the pointer has to be to a lap's line, in pixels, for hovering the
-// map to move the shared cursor. Click to pin if you want it to stop moving at
-// all.
-const MAP_HOVER_RADIUS = 18
+// How close a click has to land to a lap's line, in pixels, to take it.
+// Hovering the map deliberately does nothing: the cursor drives the charts, the
+// gauges and the readout, and having it snatched away every time the pointer
+// crossed the map — on its way to the buttons in its own corner, say — loses the
+// position being read. A click is a deliberate act and may reach further.
+const MAP_CLICK_RADIUS = 40
 
 function attachMapCursor() {
   const canvas = el('map')
@@ -3155,13 +3157,16 @@ function attachMapCursor() {
     // means the cursor — and with it every chart, gauge and readout — is stolen
     // whenever the pointer merely crosses the map on its way somewhere else,
     // which reads as the dot chasing the mouse.
-    if (!best || best.distance > MAP_HOVER_RADIUS ** 2) return
+    // Remember what a click would take, and change nothing else.
+    if (!best || best.distance > MAP_CLICK_RADIUS ** 2) {
+      state.mapHoverValue = null
+      canvas.style.cursor = 'default'
+      return
+    }
     state.hoverLapKey = lapKey(best.entry)
     state.mapHoverValue = axisValues(best.entry.lap)[best.index]
-    setCursor(state.mapHoverValue, { source: 'map' })
-  })
-  canvas.addEventListener('mouseleave', () => {
-    if (!cursorLocked()) setCursor(null, { source: 'map' })
+    // The pointer says where a click would land.
+    canvas.style.cursor = 'pointer'
   })
   canvas.addEventListener('click', () => {
     if (state.dragMoved || state.mapHoverValue == null) return
